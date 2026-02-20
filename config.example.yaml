@@ -1,0 +1,16 @@
+# Скопируй в config.yaml и заполни
+# 
+# Как узнать topic_id (message_thread_id):
+1. Напиши любое сообщение в нужный топик
+2. Запусти бота с логированием - в логах увидишь message_thread_id
+3. Либо используй команду /topic_id в топике - бот ответит ID
+
+telegram:
+  group_id: -1001234567890
+  # allowed_users: [123456789]  # только эти user_id; пусто = все
+
+# Маппинг: message_thread_id топика -> какой агент обрабатывает
+# General topic обычно имеет id=1
+topics:
+  2: notion   # топик "Notion AI Agent"
+  3: analytics   # топик "Analytics"
