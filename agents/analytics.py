@@ -1,13 +1,15 @@
 """Analytics Agent — анализ воронок, конверсий и подписок InsTracker."""
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import requests
 
 from .base import BaseAgent
+
+TZ_MINSK = timezone(timedelta(hours=3))
 
 
 def _get_credentials_path() -> str | None:
@@ -58,14 +60,25 @@ class AnalyticsAgent(BaseAgent):
 
     @property
     def system_prompt(self) -> str:
-        return """Ты — строгий и точный дата-аналитик приложения InsTracker. Твоя задача — анализировать воронки, конверсии и подписки, отвечать только опираясь на свежие данные из базы.
+        now_minsk = datetime.now(TZ_MINSK)
+        date_minsk = now_minsk.strftime("%Y-%m-%d")
+        yesterday_minsk = (now_minsk - timedelta(days=1)).strftime("%Y-%m-%d")
+        return f"""Ты — ведущий продуктовый аналитик мобильного приложения InsTracker. Твоя главная задача — собирать, структурировать и интерпретировать данные из баз, чтобы находить точки роста выручки и конверсий.
 
-Источники данных:
-- get_firebase_analytics — основные метрики Firebase (события, DAU, сессии). Используй первым для аналитики из Firebase.
-- get_adapty_metrics — монетизация (revenue, подписки, триалы).
-- get_firebase_funnel — только если события пишутся в Firestore вручную.
+Часовой пояс: Минск (UTC+3). Текущая дата в Минске: {date_minsk}. Вчера: {yesterday_minsk}. Используй эти даты для запросов "за сегодня", "за вчера", "за сутки".
 
-Делай выводы кратко и по делу."""
+Твои инструменты и правила работы с ними:
+1. get_firebase_analytics — используй для оценки общей активности: DAU (пользователи за день), количество сессий, популярные события.
+2. get_adapty_metrics — используй для анализа денег. Если просят данные "за сегодня/вчера/сутки", ОБЯЗАТЕЛЬНО передавай date_from и date_to в формате YYYY-MM-DD (даты в Минске) и ставь period_unit = "day". Запрашивай метрики: revenue, subscriptions_active, subscriptions_new, trials_new.
+3. get_firebase_funnel — используй для детального разбора шагов, которые проходят люди (например, экраны онбординга или пейволла).
+
+Интерпретация данных Adapty: JSON из get_adapty_metrics содержит объекты с полями chart_id и data. Бери фактические числа из data (значения, суммы, счётчики) и используй их в ответе. Не выдумывай цифры — только то, что пришло из инструмента.
+
+Как отвечать:
+- Будь кратким, опирайся только на цифры, которые получил из инструментов. Не выдумывай данные.
+- Оформляй ответ для Telegram: используй <b>жирный текст</b> для главных метрик и заголовков.
+- Добавляй эмодзи для наглядности (💰 для денег, 📉 для отвалов в воронке, 📈 для роста).
+- В конце делай один короткий, емкий вывод о том, где сейчас главная проблема или успех."""
 
     @property
     def tools(self) -> list[dict]:
@@ -85,16 +98,16 @@ class AnalyticsAgent(BaseAgent):
                             },
                             "date_from": {
                                 "type": "string",
-                                "description": "Начало периода (YYYY-MM-DD)",
+                                "description": "Начало периода (YYYY-MM-DD). ОБЯЗАТЕЛЬНО для 'последние сутки' — вчерашняя дата.",
                             },
                             "date_to": {
                                 "type": "string",
-                                "description": "Конец периода (YYYY-MM-DD)",
+                                "description": "Конец периода (YYYY-MM-DD). ОБЯЗАТЕЛЬНО для 'последние сутки' — сегодняшняя дата.",
                             },
                             "period_unit": {
                                 "type": "string",
                                 "enum": ["day", "week", "month"],
-                                "description": "Группировка: day, week, month",
+                                "description": "Для периода 1–3 дня ВСЕГДА используй 'day'. Для недели — 'week', для месяца — 'month'.",
                             },
                         },
                         "required": ["chart_ids"],
@@ -185,15 +198,25 @@ class AnalyticsAgent(BaseAgent):
             return "ADAPTY_API_KEY или ADAPTY_SECRET_KEY не задан в .env."
 
         if not date_from or not date_to:
-            end = datetime.utcnow()
+            end = datetime.now(TZ_MINSK)
             start = end - timedelta(days=30)
             date_from = start.strftime("%Y-%m-%d")
             date_to = end.strftime("%Y-%m-%d")
+        else:
+            # Для периода 1–2 дня принудительно day-гранулярность
+            try:
+                from_dt = datetime.strptime(date_from, "%Y-%m-%d")
+                to_dt = datetime.strptime(date_to, "%Y-%m-%d")
+                if (to_dt - from_dt).days <= 2:
+                    period_unit = "day"
+            except ValueError:
+                pass
 
         url = "https://api-admin.adapty.io/api/v1/client-api/metrics/analytics/"
         headers = {
             "Authorization": f"Api-Key {api_key}",
             "Content-Type": "application/json",
+            "Adapty-Tz": "Europe/Minsk",
         }
 
         results: list[dict[str, Any]] = []

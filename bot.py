@@ -271,7 +271,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Telegram лимит 4096 символов
         if len(response) > 4000:
             response = response[:3997] + "..."
-        await msg.reply_text(response, message_thread_id=thread_id)
+        try:
+            await msg.reply_text(
+                response,
+                message_thread_id=thread_id,
+                parse_mode="HTML",
+            )
+        except Exception as parse_err:
+            logger.warning("HTML parse failed, sending as plain text: %s", parse_err)
+            await msg.reply_text(response, message_thread_id=thread_id)
     except Exception as e:
         logger.exception("Ошибка при обработке запроса: %s", e, exc_info=True)
         if status_msg:
