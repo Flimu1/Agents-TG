@@ -52,11 +52,6 @@ class BaseAgent(ABC):
         """Обработка сообщения пользователя с поддержкой tool calls."""
         self.messages.append({"role": "user", "content": user_message})
 
-        use_openrouter = bool(os.getenv("OPENROUTER_API_KEY"))
-        extra_kwargs: dict[str, Any] = {}
-        if use_openrouter and "gemini" in self.model.lower():
-            extra_kwargs["reasoning"] = {"effort": "high"}
-
         while True:
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -66,7 +61,6 @@ class BaseAgent(ABC):
                 ],
                 tools=self.tools if self.tools else None,
                 tool_choice="auto" if self.tools else None,
-                **extra_kwargs,
             )
 
             choice = response.choices[0]

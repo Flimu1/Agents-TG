@@ -8,7 +8,7 @@ import logging
 import os
 import tempfile
 from pathlib import Path
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 import yaml
 from dotenv import load_dotenv
@@ -42,6 +42,38 @@ ALLOWED_USERS: list[int] = CONFIG.get("telegram", {}).get("allowed_users") or []
 agent_cache: dict[tuple[int, int], object] = {}
 
 
+# Сообщения об ошибках для пользователя (понятным языком)
+ERROR_MESSAGES = {
+    "rate_limit": "Слишком много запросов. Подожди немного и попробуй снова.",
+    "authentication": "Ошибка доступа к API. Проверь OPENROUTER_API_KEY в настройках.",
+    "timeout": "Запрос занял слишком много времени. Попробуй ещё раз.",
+    "connection": "Не удалось подключиться к серверу. Проверь интернет.",
+    "model": "Модель недоступна. Проверь LLM_MODEL в настройках.",
+    "quota": "Исчерпан лимит запросов. Попробуй позже или проверь баланс.",
+}
+
+
+def _human_error_message(exc: Exception) -> str:
+    """Преобразует исключение в понятное сообщение для пользователя."""
+    err_str = str(exc).lower()
+    if "rate" in err_str or "limit" in err_str or "429" in err_str:
+        return ERROR_MESSAGES["rate_limit"]
+    if "auth" in err_str or "401" in err_str or "403" in err_str or "api_key" in err_str:
+        return ERROR_MESSAGES["authentication"]
+    if "timeout" in err_str or "timed out" in err_str:
+        return ERROR_MESSAGES["timeout"]
+    if "connection" in err_str or "connect" in err_str or "network" in err_str:
+        return ERROR_MESSAGES["connection"]
+    if "model" in err_str or "404" in err_str or "not found" in err_str:
+        return ERROR_MESSAGES["model"]
+    if "unexpected keyword" in err_str or "reasoning" in err_str:
+        return "Версия API изменилась. Обнови бота или напиши разработчику."
+    if "quota" in err_str or "insufficient" in err_str:
+        return ERROR_MESSAGES["quota"]
+    # Общий fallback — коротко и без технических деталей
+    return "Произошла ошибка при обработке запроса. Попробуй ещё раз или напиши разработчику."
+
+
 def _get_openrouter_client() -> Optional[OpenAI]:
     """OpenRouter-клиент для транскрипции (тот же ключ, что и для агентов)."""
     api_key = os.getenv("OPENROUTER_API_KEY")
@@ -53,13 +85,20 @@ def _get_openrouter_client() -> Optional[OpenAI]:
     )
 
 
-async def transcribe_voice(bot, voice_file_id: str) -> Optional[str]:
+async def transcribe_voice(
+    bot,
+    voice_file_id: str,
+    *,
+    on_status: Optional[Callable[[str], Awaitable[None]]] = None,
+) -> Optional[str]:
     """Транскрипция голосового сообщения через OpenRouter (Gemini с аудио)."""
     client = _get_openrouter_client()
     if not client:
         return None
 
     try:
+        if on_status:
+            await on_status("Скачиваю голосовое...")
         voice_file = await bot.get_file(voice_file_id)
         tmp_path = tempfile.mktemp(suffix=".ogg")
         await voice_file.download_to_drive(tmp_path)
@@ -70,6 +109,8 @@ async def transcribe_voice(bot, voice_file_id: str) -> Optional[str]:
             if os.path.exists(tmp_path):
                 os.unlink(tmp_path)
 
+        if on_status:
+            await on_status("Транскрибирую голосовое...")
         audio_b64 = base64.standard_b64encode(audio_bytes).decode("ascii")
         model = os.getenv("LLM_MODEL", "google/gemini-3-flash-preview")
 
@@ -171,17 +212,49 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Текст или голос -> текст (голос через OpenRouter/Gemini)
+    status_msg = None
+
     if msg.voice:
-        user_text = await transcribe_voice(context.bot, msg.voice.file_id)
+        status_msg = await msg.reply_text(
+            "🔹 Принял голосовое. Скачиваю...",
+            message_thread_id=thread_id,
+        )
+
+        async def update_status(text: str) -> None:
+            if status_msg:
+                try:
+                    await status_msg.edit_text(f"🔹 {text}")
+                except Exception:
+                    pass
+
+        user_text = await transcribe_voice(
+            context.bot,
+            msg.voice.file_id,
+            on_status=update_status,
+        )
         if not user_text:
             await msg.reply_text(
                 "Не удалось распознать голос. Проверь OPENROUTER_API_KEY и попробуй ещё раз.",
                 message_thread_id=thread_id,
             )
+            if status_msg:
+                try:
+                    await status_msg.delete()
+                except Exception:
+                    pass
             return
         logger.info("Voice transcribed: %s...", user_text[:50] if len(user_text) > 50 else user_text)
+        if status_msg:
+            try:
+                await status_msg.edit_text("🔹 Генерирую ответ...")
+            except Exception:
+                pass
     elif msg.text:
         user_text = msg.text
+        status_msg = await msg.reply_text(
+            "🔹 Генерирую ответ...",
+            message_thread_id=thread_id,
+        )
     else:
         return
 
@@ -189,13 +262,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         response = agent.process(user_text)
+        # Удаляем статус перед ответом
+        if status_msg:
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
         # Telegram лимит 4096 символов
         if len(response) > 4000:
             response = response[:3997] + "..."
         await msg.reply_text(response, message_thread_id=thread_id)
     except Exception as e:
-        logger.exception(e)
-        await msg.reply_text(f"Ошибка: {e}", message_thread_id=thread_id)
+        logger.exception("Ошибка при обработке запроса: %s", e, exc_info=True)
+        if status_msg:
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
+        user_friendly = _human_error_message(e)
+        await msg.reply_text(user_friendly, message_thread_id=thread_id)
 
 
 def main():
