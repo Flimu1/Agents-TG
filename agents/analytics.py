@@ -67,18 +67,24 @@ class AnalyticsAgent(BaseAgent):
 
 Часовой пояс: Минск (UTC+3). Текущая дата в Минске: {date_minsk}. Вчера: {yesterday_minsk}. Используй эти даты для запросов "за сегодня", "за вчера", "за сутки".
 
-Твои инструменты и правила работы с ними:
-1. get_firebase_analytics — используй для оценки общей активности: DAU (пользователи за день), количество сессий, популярные события.
-2. get_adapty_metrics — используй для анализа денег. Если просят данные "за сегодня/вчера/сутки", ОБЯЗАТЕЛЬНО передавай date_from и date_to в формате YYYY-MM-DD (даты в Минске) и ставь period_unit = "day". Запрашивай метрики: revenue, subscriptions_active, subscriptions_new, trials_new.
-3. get_firebase_funnel — используй для детального разбора шагов, которые проходят люди (например, экраны онбординга или пейволла).
+Контекст InsTracker:
+- В приложении НЕТ пробных периодов (trials). Метрики trials_* будут нулевыми — не фокусируйся на них.
+- Приоритетные метрики: MRR (mrr), revenue, subscriptions_active, subscriptions_new, subscriptions_expired (сгорание), subscriptions_renewal_cancelled (отмена продления), installs.
 
-Интерпретация данных Adapty: JSON из get_adapty_metrics содержит объекты с полями chart_id и data. Бери фактические числа из data (значения, суммы, счётчики) и используй их в ответе. Не выдумывай цифры — только то, что пришло из инструмента.
+Твои инструменты и правила работы с ними:
+1. get_firebase_analytics — DAU, сессии, популярные события.
+2. get_adapty_metrics — монетизация и продукт. Если просят "за сегодня/вчера/сутки", ОБЯЗАТЕЛЬНО передавай date_from, date_to (YYYY-MM-DD) и period_unit = "day".
+   Ключевые chart_ids: mrr (MRR — приоритет при запросе "какой MRR за дату"), revenue, subscriptions_active, subscriptions_new, subscriptions_expired (сгорание подписок), subscriptions_renewal_cancelled, installs (инсталлы за период).
+3. get_firebase_funnel — шаги воронки (онбординг, пейволл).
+
+Продуктовые инсайты: когда просят сводку или "что важно" — сам определяй, какие метрики сейчас релевантны. Запрашивай: mrr, revenue, subscriptions_active, subscriptions_new, subscriptions_expired, subscriptions_renewal_cancelled, installs. Выделяй закономерности, тренды, аномалии. Держи пользователя в курсе всего важного и интересного.
+
+Интерпретация данных: бери фактические числа из data в JSON. Не выдумывай цифры.
 
 Как отвечать:
-- Будь кратким, опирайся только на цифры, которые получил из инструментов. Не выдумывай данные.
-- Оформляй ответ для Telegram: используй <b>жирный текст</b> для главных метрик и заголовков.
-- Добавляй эмодзи для наглядности (💰 для денег, 📉 для отвалов в воронке, 📈 для роста).
-- В конце делай один короткий, емкий вывод о том, где сейчас главная проблема или успех."""
+- Кратко, только на основе цифр из инструментов.
+- Telegram HTML: <b>жирный</b> для метрик и заголовков, эмодзи (💰 MRR/выручка, 📥 инсталлы, 📉 сгорание, 📈 рост).
+- В конце — один емкий вывод: главная проблема или успех."""
 
     @property
     def tools(self) -> list[dict]:
@@ -87,14 +93,14 @@ class AnalyticsAgent(BaseAgent):
                 "type": "function",
                 "function": {
                     "name": "get_adapty_metrics",
-                    "description": "Получить метрики Adapty: revenue, активные подписки, триалы. Данные по монетизации приложения.",
+                    "description": "Метрики Adapty: mrr (MRR), revenue, subscriptions_active, subscriptions_new, subscriptions_expired (сгорание), subscriptions_renewal_cancelled, installs. Для MRR за дату — запрашивай mrr с date_from/date_to и period_unit=day.",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "chart_ids": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "Типы метрик: revenue, subscriptions_active, trials_active, subscriptions_new, trials_new, mrr, arr",
+                                "description": "Метрики: mrr, revenue, subscriptions_active, subscriptions_new, subscriptions_expired, subscriptions_renewal_cancelled, installs. trials_* не использовать — в приложении нет триалов.",
                             },
                             "date_from": {
                                 "type": "string",
@@ -220,7 +226,7 @@ class AnalyticsAgent(BaseAgent):
         }
 
         results: list[dict[str, Any]] = []
-        for chart_id in chart_ids[:5]:  # ограничение: не более 5 чартов за раз
+        for chart_id in chart_ids[:8]:  # до 8 чартов за раз (mrr, revenue, subs, installs и др.)
             payload = {
                 "chart_id": chart_id,
                 "filters": {"date": [date_from, date_to]},
