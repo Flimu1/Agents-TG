@@ -18,6 +18,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
 from agents import AGENTS
+from agents.base import OPENROUTER_DEFAULT_MODEL
 
 load_dotenv()
 logging.basicConfig(
@@ -132,7 +133,7 @@ async def transcribe_voice(
         if on_status:
             await on_status("Транскрибирую голосовое...")
         audio_b64 = base64.standard_b64encode(audio_bytes).decode("ascii")
-        model = os.getenv("LLM_MODEL", "google/gemini-3-flash-preview")
+        model = os.getenv("LLM_MODEL", OPENROUTER_DEFAULT_MODEL)
 
         resp = client.chat.completions.create(
             model=model,
