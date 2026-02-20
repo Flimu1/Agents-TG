@@ -1,29 +1,87 @@
 """Product Agent — гипотезы для А/Б тестов пейволла и онбординга InsTracker."""
 
-from .base import BaseAgent
+from datetime import datetime
+
+from .analytics import AnalyticsAgent, TZ_MINSK
 
 
-class ProductAgent(BaseAgent):
+class ProductAgent(AnalyticsAgent):
     """Агент-продакт-менеджер: анализирует аналитику и предлагает гипотезы для роста конверсии."""
 
     @property
     def system_prompt(self) -> str:
-        return """Ты — опытный Product Manager и Growth Hacker мобильного приложения InsTracker. Твоя ключевая цель — придумывать гипотезы, которые кратно увеличат конверсию в платную подписку и улучшат пользовательский опыт.
+        now_minsk = datetime.now(TZ_MINSK)
+        date_minsk = now_minsk.strftime("%Y-%m-%d")
+        return f"""Ты — Product Manager мобильного приложения InsTracker.
+Часовой пояс: Минск (UTC+3). Текущая дата: {date_minsk}.
 
-Как ты работаешь:
-1. Анализ: Внимательно изучай цифры, которые тебе присылают (например, отчеты от аналитика). Ищи "узкие места" — шаги, где мы теряем больше всего людей.
-2. Генерация идей: На основе цифр предлагай 2-3 нестандартные, но легко реализуемые идеи для А/Б тестов. Фокусируйся на экранах первого входа (онбординг) и окнах оплаты (пейволл).
-3. Инструменты: Если тебе добавят инструменты доступа к базам или Notion, смело используй их для поиска прошлого контекста или сохранения новых идей.
+Когда получаешь любой запрос про рост, гипотезы, конверсию или "что делать" — СНАЧАЛА сам запроси актуальные данные:
+- get_adapty_metrics: chart_ids=[mrr, revenue, subscriptions_new, subscriptions_expired, installs], period_unit=month
+- get_firebase_analytics: days_back=14
 
-Формат ответа для Telegram:
-- <b>Проблема:</b> Кратко, что мы видим в цифрах.
-- <b>Гипотезы:</b> Список идей. Каждая идея должна строиться по формуле: "Если мы изменим [А], то ожидаем рост [B], потому что [C]".
-- <b>Приоритет:</b> Что стоит отдать команде в разработку прямо сейчас, чтобы синхронизировать усилия и получить самый быстрый результат.
-- Используй эмодзи (🚀, 💡, 🎯) и <b>жирный шрифт</b> для читаемости."""
+Только после получения данных — анализируй и предлагай идеи.
+
+Формат ответа:
+<b>📊 Ситуация:</b> 2-3 главных факта из цифр.
+<b>💡 Гипотезы (2-3 шт):</b>
+Каждая по формуле: Если мы изменим [X] → ожидаем рост [Y] потому что [Z]. Оценка сложности: Easy/Medium/Hard.
+<b>🎯 Приоритет #1:</b> Что делать прямо сейчас и почему.
+
+Используй Telegram HTML: <b>жирный</b>, эмодзи. Кратко."""
 
     @property
     def tools(self) -> list[dict]:
-        return []
-
-    def _call_tool(self, name: str, arguments: dict) -> str:
-        return f"Ошибка: ProductAgent не поддерживает вызов инструментов (tool '{name}'). Этот агент работает только на основе предоставленной аналитики."
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_adapty_metrics",
+                    "description": "Метрики Adapty: mrr (MRR), revenue, subscriptions_active, subscriptions_new, subscriptions_expired (сгорание), subscriptions_renewal_cancelled, installs. Для MRR за дату — запрашивай mrr с date_from/date_to и period_unit=day.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "chart_ids": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Метрики: mrr, revenue, subscriptions_active, subscriptions_new, subscriptions_expired, subscriptions_renewal_cancelled, installs. trials_* не использовать — в приложении нет триалов.",
+                            },
+                            "date_from": {
+                                "type": "string",
+                                "description": "Начало периода (YYYY-MM-DD). ОБЯЗАТЕЛЬНО для 'последние сутки' — вчерашняя дата.",
+                            },
+                            "date_to": {
+                                "type": "string",
+                                "description": "Конец периода (YYYY-MM-DD). ОБЯЗАТЕЛЬНО для 'последние сутки' — сегодняшняя дата.",
+                            },
+                            "period_unit": {
+                                "type": "string",
+                                "enum": ["day", "week", "month"],
+                                "description": "Для периода 1–3 дня ВСЕГДА используй 'day'. Для недели — 'week', для месяца — 'month'.",
+                            },
+                        },
+                        "required": ["chart_ids"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_firebase_analytics",
+                    "description": "Метрики GA4: топ событий (eventName + eventCount), DAU по дням (date + activeUsers), сессии по дням (date + sessions). Основной источник аналитики приложения.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "days_back": {
+                                "type": "integer",
+                                "description": "За сколько дней брать данные (по умолчанию 30)",
+                            },
+                            "event_names": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Фильтр по именам событий (пусто = все события)",
+                            },
+                        },
+                    },
+                },
+            },
+        ]

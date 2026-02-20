@@ -15,52 +15,56 @@ load_dotenv()
 PROJECT_ROOT = Path(__file__).parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from agents.analytics import _get_credentials_path, _get_bigquery_client
+from agents.analytics import _get_credentials_path, _get_ga4_client
 
 
 def test_firebase_analytics():
-    """1. Firebase Analytics (BigQuery) — основные метрики."""
+    """1. GA4 (Google Analytics 4) — основные метрики."""
     print("\n" + "=" * 50)
-    print("1. FIREBASE ANALYTICS (BigQuery)")
+    print("1. GA4 (Google Analytics 4)")
     print("=" * 50)
 
     if not _get_credentials_path():
-        print("❌ FIREBASE_CREDENTIALS_PATH не задан или файл не найден")
+        print("❌ GOOGLE_CREDENTIALS_PATH не задан или файл не найден")
         return False
 
     print("✓ Файл credentials найден")
 
-    dataset = os.getenv("FIREBASE_ANALYTICS_DATASET")
-    if not dataset:
-        print("⚠️ FIREBASE_ANALYTICS_DATASET не задан. Добавь в .env (формат: analytics_XXXXX)")
+    property_id = os.getenv("GA4_PROPERTY_ID")
+    if not property_id:
+        print("⚠️ GA4_PROPERTY_ID не задан. Добавь в .env (только цифры, например 123456789)")
         return False
 
-    client = _get_bigquery_client()
+    client = _get_ga4_client()
     if not client:
-        print("❌ BigQuery-клиент недоступен (установи google-cloud-bigquery)")
+        print("❌ GA4-клиент недоступен (установи google-analytics-data)")
         return False
 
     try:
-        from datetime import datetime, timedelta
-        since = (datetime.utcnow() - timedelta(days=1)).strftime("%Y%m%d")
-        query = f"""
-        SELECT event_name, COUNT(*) as cnt
-        FROM `{client.project}.{dataset}.events_*`
-        WHERE _TABLE_SUFFIX >= '{since}'
-        GROUP BY event_name
-        LIMIT 5
-        """
-        rows = list(client.query(query).result())
-        print(f"✓ Firebase Analytics (BigQuery) доступен. Событий за 1 день: {sum(r.cnt for r in rows)}")
+        from google.analytics.data_v1beta.types import (
+            DateRange,
+            Dimension,
+            Metric,
+            RunReportRequest,
+        )
+
+        req = RunReportRequest(
+            property=f"properties/{property_id}",
+            dimensions=[Dimension(name="eventName")],
+            metrics=[Metric(name="eventCount")],
+            date_ranges=[DateRange(start_date="1daysAgo", end_date="today")],
+            limit=5,
+        )
+        response = client.run_report(req)
+        total = sum(int(r.metric_values[0].value) for r in response.rows) if response.rows else 0
+        print(f"✓ GA4 доступен. Событий за 1 день: {total}")
         return True
     except Exception as e:
         err = str(e)
-        if "404" in err or "Not found" in err:
-            print(f"❌ Dataset '{dataset}' не найден. Включи экспорт Firebase → BigQuery.")
-        elif "403" in err or "Permission" in err:
-            print("❌ Нет доступа к BigQuery. Выдай сервисному аккаунту роль BigQuery Data Viewer.")
+        if "403" in err or "Permission" in err:
+            print("❌ Нет доступа к GA4. Добавь сервисный аккаунт в GA4 с ролью Viewer.")
         else:
-            print(f"❌ Ошибка BigQuery: {e}")
+            print(f"❌ Ошибка GA4: {e}")
         return False
 
 

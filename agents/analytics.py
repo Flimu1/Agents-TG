@@ -1,4 +1,6 @@
 """Analytics Agent — анализ воронок, конверсий и подписок InsTracker."""
+from __future__ import annotations
+
 import json
 import os
 from datetime import datetime, timedelta, timezone
@@ -11,10 +13,13 @@ from .base import BaseAgent
 
 TZ_MINSK = timezone(timedelta(hours=3))
 
+# Lazy GA4 client (инициализация при первом вызове)
+_ga4_client: Any = None
+
 
 def _get_credentials_path() -> str | None:
-    """Путь к Firebase credentials (для Firestore и BigQuery)."""
-    cred_path = os.getenv("FIREBASE_CREDENTIALS_PATH")
+    """Путь к Google credentials (service account JSON для GA4)."""
+    cred_path = os.getenv("GOOGLE_CREDENTIALS_PATH")
     if not cred_path:
         return None
     if not os.path.isabs(cred_path):
@@ -22,41 +27,31 @@ def _get_credentials_path() -> str | None:
     return cred_path if os.path.exists(cred_path) else None
 
 
-def _get_bigquery_client():
-    """BigQuery-клиент для Firebase Analytics (экспорт в BigQuery)."""
+def _get_ga4_client():
+    """GA4 Data API клиент (lazy, при первом обращении)."""
+    global _ga4_client
+    if _ga4_client is not None:
+        return _ga4_client
     cred_path = _get_credentials_path()
     if not cred_path:
         return None
     try:
-        from google.cloud import bigquery
-        from google.oauth2 import service_account
-        cred = service_account.Credentials.from_service_account_file(cred_path)
-        return bigquery.Client(credentials=cred, project=cred.project_id)
+        from google.analytics.data_v1beta import BetaAnalyticsDataClient
+
+        _ga4_client = BetaAnalyticsDataClient.from_service_account_file(cred_path)
+        return _ga4_client
     except ImportError:
         return None
     except Exception:
         return None
 
 
-def _get_firestore():
-    """Получить Firestore-клиент (инициализация при первом обращении)."""
-    cred_path = _get_credentials_path()
-    if not cred_path:
-        return None
-    try:
-        import firebase_admin
-        from firebase_admin import credentials, firestore
-    except ImportError:
-        return None
-
-    if not firebase_admin._apps:
-        cred = credentials.Certificate(cred_path)
-        firebase_admin.initialize_app(cred)
-    return firestore.client()
-
-
 class AnalyticsAgent(BaseAgent):
-    """Агент для анализа метрик: Adapty (revenue, подписки, триалы) и Firebase (воронка онбординга)."""
+    """Агент для анализа метрик: Adapty (revenue, подписки, триалы) и GA4 (воронка онбординга)."""
+
+    def __init__(self, **kwargs):
+        kwargs.pop("history_limit", None)  # всегда 0 для аналитики
+        super().__init__(history_limit=0, **kwargs)
 
     @property
     def system_prompt(self) -> str:
@@ -72,10 +67,10 @@ class AnalyticsAgent(BaseAgent):
 - Приоритетные метрики: MRR (mrr), revenue, subscriptions_active, subscriptions_new, subscriptions_expired (сгорание), subscriptions_renewal_cancelled (отмена продления), installs.
 
 Твои инструменты и правила работы с ними:
-1. get_firebase_analytics — DAU, сессии, популярные события.
+1. get_firebase_analytics — DAU, сессии, популярные события из GA4 (Google Analytics 4).
 2. get_adapty_metrics — монетизация и продукт. Если просят "за сегодня/вчера/сутки", ОБЯЗАТЕЛЬНО передавай date_from, date_to (YYYY-MM-DD) и period_unit = "day".
    Ключевые chart_ids: mrr (MRR — приоритет при запросе "какой MRR за дату"), revenue, subscriptions_active, subscriptions_new, subscriptions_expired (сгорание подписок), subscriptions_renewal_cancelled, installs (инсталлы за период).
-3. get_firebase_funnel — шаги воронки (онбординг, пейволл).
+3. get_firebase_funnel — воронка по шагам (event_names). Возвращает eventCount по каждому событию и % относительно первого шага.
 
 Продуктовые инсайты: когда просят сводку или "что важно" — сам определяй, какие метрики сейчас релевантны. Запрашивай: mrr, revenue, subscriptions_active, subscriptions_new, subscriptions_expired, subscriptions_renewal_cancelled, installs. Выделяй закономерности, тренды, аномалии. Держи пользователя в курсе всего важного и интересного.
 
@@ -124,7 +119,7 @@ class AnalyticsAgent(BaseAgent):
                 "type": "function",
                 "function": {
                     "name": "get_firebase_analytics",
-                    "description": "Получить все метрики и события из Firebase Analytics (BigQuery). События, воронка, DAU, конверсии. Основной источник аналитики Firebase.",
+                    "description": "Метрики GA4: топ событий (eventName + eventCount), DAU по дням (date + activeUsers), сессии по дням (date + sessions). Основной источник аналитики приложения.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -145,23 +140,21 @@ class AnalyticsAgent(BaseAgent):
                 "type": "function",
                 "function": {
                     "name": "get_firebase_funnel",
-                    "description": "Получить воронку из Firestore (если события пишутся в коллекцию вручную). Для Firebase Analytics используй get_firebase_analytics.",
+                    "description": "Воронка по шагам: передай event_names (список событий в порядке воронки). Возвращает eventCount по каждому событию и % относительно первого шага.",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "collection": {
-                                "type": "string",
-                                "description": "Имя коллекции с событиями (по умолчанию analytics_events)",
-                            },
-                            "event_field": {
-                                "type": "string",
-                                "description": "Поле с названием шага/события (по умолчанию event_name)",
+                            "event_names": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Список имён событий — шаги воронки (например: session_start, onboarding_step1, paywall_view, purchase)",
                             },
                             "days_back": {
                                 "type": "integer",
                                 "description": "За сколько дней считать (по умолчанию 30)",
                             },
                         },
+                        "required": ["event_names"],
                     },
                 },
             },
@@ -183,8 +176,7 @@ class AnalyticsAgent(BaseAgent):
                 )
             if name == "get_firebase_funnel":
                 return self._get_firebase_funnel(
-                    collection=arguments.get("collection", "analytics_events"),
-                    event_field=arguments.get("event_field", "event_name"),
+                    event_names=arguments.get("event_names") or [],
                     days_back=arguments.get("days_back", 30),
                 )
         except Exception as e:
@@ -248,124 +240,191 @@ class AnalyticsAgent(BaseAgent):
         days_back: int = 30,
         event_names: list[str] | None = None,
     ) -> str:
-        """Получить метрики и события из Firebase Analytics (BigQuery export)."""
-        client = _get_bigquery_client()
-        if not client:
-            return "BigQuery недоступен. Установи google-cloud-bigquery и задай FIREBASE_CREDENTIALS_PATH."
-
-        dataset_id = os.getenv("FIREBASE_ANALYTICS_DATASET")
-        if not dataset_id:
+        """Получить метрики и события из GA4 (Google Analytics Data API)."""
+        try:
+            from google.analytics.data_v1beta import BetaAnalyticsDataClient
+            from google.analytics.data_v1beta.types import (
+                DateRange,
+                Dimension,
+                Filter,
+                FilterExpression,
+                Metric,
+                RunReportRequest,
+            )
+        except ImportError:
             return (
-                "FIREBASE_ANALYTICS_DATASET не задан в .env. "
-                "Укажи dataset из BigQuery (формат: analytics_XXXXX). "
-                "Включи экспорт Firebase Analytics → BigQuery в консоли Firebase."
+                "Библиотека google-analytics-data не установлена. "
+                "Выполни: pip install google-analytics-data>=0.18.0"
             )
 
-        event_filter = ""
-        if event_names:
-            escaped = [f"'{e.replace(chr(39), chr(39)+chr(39))}'" for e in event_names[:20]]
-            event_filter = f" AND event_name IN ({','.join(escaped)})"
+        client = _get_ga4_client()
+        if not client:
+            return (
+                "GA4 недоступен. Задай GOOGLE_CREDENTIALS_PATH (путь к service account JSON) в .env."
+            )
 
-        since = (datetime.utcnow() - timedelta(days=days_back)).strftime("%Y%m%d")
+        property_id = os.getenv("GA4_PROPERTY_ID")
+        if not property_id:
+            return (
+                "GA4_PROPERTY_ID не задан в .env. "
+                "Укажи Property ID GA4 (только цифры, например 123456789)."
+            )
 
-        queries = []
-
-        # 1. События и их количество (воронка)
-        q_events = f"""
-        SELECT event_name, COUNT(*) as cnt
-        FROM `{client.project}.{dataset_id}.events_*`
-        WHERE _TABLE_SUFFIX >= '{since}'
-        {event_filter}
-        GROUP BY event_name
-        ORDER BY cnt DESC
-        LIMIT 50
-        """
-        queries.append(("События (воронка)", q_events))
-
-        # 2. DAU / активные пользователи
-        q_dau = f"""
-        SELECT event_date, COUNT(DISTINCT user_pseudo_id) as dau
-        FROM `{client.project}.{dataset_id}.events_*`
-        WHERE _TABLE_SUFFIX >= '{since}'
-        GROUP BY event_date
-        ORDER BY event_date DESC
-        LIMIT 31
-        """
-        queries.append(("DAU по дням", q_dau))
-
-        # 3. Сессии
-        q_sessions = f"""
-        SELECT event_date, COUNT(*) as sessions
-        FROM `{client.project}.{dataset_id}.events_*`
-        WHERE _TABLE_SUFFIX >= '{since}' AND event_name = 'session_start'
-        GROUP BY event_date
-        ORDER BY event_date DESC
-        LIMIT 31
-        """
-        queries.append(("Сессии (session_start)", q_sessions))
+        end_date = datetime.now(TZ_MINSK)
+        start_date = end_date - timedelta(days=days_back)
+        date_range = DateRange(
+            start_date=start_date.strftime("%Y-%m-%d"),
+            end_date=end_date.strftime("%Y-%m-%d"),
+        )
 
         results: list[dict[str, Any]] = []
-        for label, query in queries:
-            try:
-                rows = list(client.query(query).result())
-                if rows:
-                    data = [dict(r) for r in rows]
-                    results.append({"metric": label, "data": data})
-                else:
-                    results.append({"metric": label, "data": [], "note": "Нет данных"})
-            except Exception as e:
-                results.append({"metric": label, "error": str(e)})
+
+        # 1. Топ событий (eventName + eventCount)
+        dim_filter = None
+        if event_names:
+            dim_filter = FilterExpression(
+                filter=Filter(
+                    field_name="eventName",
+                    in_list_filter=Filter.InListFilter(values=event_names[:20]),
+                )
+            )
+        try:
+            req = RunReportRequest(
+                property=f"properties/{property_id}",
+                dimensions=[Dimension(name="eventName")],
+                metrics=[Metric(name="eventCount")],
+                date_ranges=[date_range],
+                dimension_filter=dim_filter,
+                limit=50,
+            )
+            response = client.run_report(req)
+            data = []
+            for row in response.rows:
+                event_name = row.dimension_values[0].value if row.dimension_values else ""
+                event_count = int(row.metric_values[0].value) if row.metric_values else 0
+                data.append({"event_name": event_name, "cnt": event_count})
+            results.append({"metric": "События (воронка)", "data": data})
+        except Exception as e:
+            results.append({"metric": "События (воронка)", "error": str(e)})
+
+        # 2. DAU по дням (date + activeUsers)
+        try:
+            req = RunReportRequest(
+                property=f"properties/{property_id}",
+                dimensions=[Dimension(name="date")],
+                metrics=[Metric(name="activeUsers")],
+                date_ranges=[date_range],
+                limit=31,
+            )
+            response = client.run_report(req)
+            data = []
+            for row in response.rows:
+                d = row.dimension_values[0].value if row.dimension_values else ""
+                dau = int(row.metric_values[0].value) if row.metric_values else 0
+                data.append({"event_date": d, "dau": dau})
+            results.append({"metric": "DAU по дням", "data": data})
+        except Exception as e:
+            results.append({"metric": "DAU по дням", "error": str(e)})
+
+        # 3. Сессии по дням (date + sessions)
+        try:
+            req = RunReportRequest(
+                property=f"properties/{property_id}",
+                dimensions=[Dimension(name="date")],
+                metrics=[Metric(name="sessions")],
+                date_ranges=[date_range],
+                limit=31,
+            )
+            response = client.run_report(req)
+            data = []
+            for row in response.rows:
+                d = row.dimension_values[0].value if row.dimension_values else ""
+                sessions = int(row.metric_values[0].value) if row.metric_values else 0
+                data.append({"event_date": d, "sessions": sessions})
+            results.append({"metric": "Сессии (session_start)", "data": data})
+        except Exception as e:
+            results.append({"metric": "Сессии (session_start)", "error": str(e)})
 
         return json.dumps(results, ensure_ascii=False, indent=2)
 
     def _get_firebase_funnel(
         self,
-        collection: str = "analytics_events",
-        event_field: str = "event_name",
+        event_names: list[str],
         days_back: int = 30,
     ) -> str:
-        """Получить воронку онбординга из Firestore по событиям."""
-        db = _get_firestore()
-        if db is None:
-            return "FIREBASE_CREDENTIALS_PATH не задан или файл не найден."
-
-        since = datetime.utcnow() - timedelta(days=days_back)
+        """Получить воронку по шагам (event_names) из GA4."""
         try:
-            ref = db.collection(collection)
-            # Firestore: фильтр по timestamp, если есть поле created_at или timestamp
-            docs = ref.stream()
-
-            step_counts: dict[str, int] = {}
-            for doc in docs:
-                d = doc.to_dict()
-                event = d.get(event_field) or d.get("event") or d.get("step") or "unknown"
-                ts = d.get("timestamp") or d.get("created_at") or d.get("date")
-                if ts:
-                    if hasattr(ts, "timestamp"):
-                        ts_val = ts.timestamp()
-                    else:
-                        try:
-                            ts_val = float(ts)
-                        except (TypeError, ValueError):
-                            ts_val = 0
-                    if ts_val < since.timestamp():
-                        continue
-                step_counts[event] = step_counts.get(event, 0) + 1
-
-            if not step_counts:
-                return f"События не найдены в коллекции '{collection}' за последние {days_back} дней."
-
-            # Сортируем по количеству (воронка: от большего к меньшему)
-            sorted_steps = sorted(
-                step_counts.items(),
-                key=lambda x: (-x[1], x[0]),
+            from google.analytics.data_v1beta.types import (
+                DateRange,
+                Dimension,
+                Filter,
+                FilterExpression,
+                Metric,
+                RunReportRequest,
             )
-            lines = [f"Воронка онбординга ({collection}, {days_back} дней):"]
-            total = max(step_counts.values()) if step_counts else 0
-            for step, count in sorted_steps:
-                pct = (count / total * 100) if total else 0
-                lines.append(f"  {step}: {count} ({pct:.1f}%)")
-            return "\n".join(lines)
+        except ImportError:
+            return (
+                "Библиотека google-analytics-data не установлена. "
+                "Выполни: pip install google-analytics-data>=0.18.0"
+            )
+
+        client = _get_ga4_client()
+        if not client:
+            return (
+                "GA4 недоступен. Задай GOOGLE_CREDENTIALS_PATH (путь к service account JSON) в .env."
+            )
+
+        property_id = os.getenv("GA4_PROPERTY_ID")
+        if not property_id:
+            return (
+                "GA4_PROPERTY_ID не задан в .env. "
+                "Укажи Property ID GA4 (только цифры, например 123456789)."
+            )
+
+        if not event_names:
+            return "Передай event_names — список шагов воронки (например: session_start, onboarding_step1, paywall_view, purchase)."
+
+        end_date = datetime.now(TZ_MINSK)
+        start_date = end_date - timedelta(days=days_back)
+        date_range = DateRange(
+            start_date=start_date.strftime("%Y-%m-%d"),
+            end_date=end_date.strftime("%Y-%m-%d"),
+        )
+
+        try:
+            req = RunReportRequest(
+                property=f"properties/{property_id}",
+                dimensions=[Dimension(name="eventName")],
+                metrics=[Metric(name="eventCount")],
+                date_ranges=[date_range],
+                dimension_filter=FilterExpression(
+                    filter=Filter(
+                        field_name="eventName",
+                        in_list_filter=Filter.InListFilter(values=event_names),
+                    )
+                ),
+            )
+            response = client.run_report(req)
+
+            # Собираем eventCount по каждому событию (в порядке event_names)
+            event_counts: dict[str, int] = {}
+            for row in response.rows:
+                name = row.dimension_values[0].value if row.dimension_values else ""
+                cnt = int(row.metric_values[0].value) if row.metric_values else 0
+                event_counts[name] = cnt
+
+            # Сохраняем порядок из event_names, добавляем % относительно первого шага
+            first_count = event_counts.get(event_names[0], 0) if event_names else 0
+            data = []
+            for ev in event_names:
+                cnt = event_counts.get(ev, 0)
+                pct = (cnt / first_count * 100) if first_count else 0
+                data.append({"event_name": ev, "event_count": cnt, "pct": round(pct, 1)})
+
+            results: list[dict[str, Any]] = [
+                {"metric": "Воронка", "data": data},
+            ]
+            return json.dumps(results, ensure_ascii=False, indent=2)
 
         except Exception as e:
-            return f"Ошибка Firestore: {e}"
+            return f"Ошибка GA4: {e}"

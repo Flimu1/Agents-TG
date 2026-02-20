@@ -3,6 +3,7 @@ Telegram бот: каждый топик в группе = отдельный AI
 Сообщение в топик обрабатывает соответствующий агент.
 Поддержка голосовых сообщений через OpenRouter (Gemini с аудио).
 """
+import asyncio
 import base64
 import logging
 import os
@@ -72,6 +73,25 @@ def _human_error_message(exc: Exception) -> str:
         return ERROR_MESSAGES["quota"]
     # Общий fallback — коротко и без технических деталей
     return "Произошла ошибка при обработке запроса. Попробуй ещё раз или напиши разработчику."
+
+
+def split_message(text: str, limit: int = 4000) -> list[str]:
+    """Разбить текст на части по абзацам, не превышая limit символов."""
+    if len(text) <= limit:
+        return [text]
+    parts = []
+    current = ""
+    for paragraph in text.split("\n\n"):
+        chunk = paragraph + "\n\n"
+        if len(current) + len(chunk) > limit:
+            if current:
+                parts.append(current.rstrip())
+            current = chunk
+        else:
+            current += chunk
+    if current.strip():
+        parts.append(current.rstrip())
+    return parts if parts else [text[:limit]]
 
 
 def _get_openrouter_client() -> Optional[OpenAI]:
@@ -150,7 +170,7 @@ def get_agent(agent_name: str, chat_id: int, thread_id: int):
         if agent_name not in AGENTS:
             return None
         cls = AGENTS[agent_name]
-        agent_cache[key] = cls()
+        agent_cache[key] = cls(agent_name=agent_name, thread_id=thread_id)
     return agent_cache[key]
 
 
@@ -165,6 +185,49 @@ async def cmd_topic_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = msg.chat_id
     text = f"Topic ID (message_thread_id): {thread_id}\nДобавь в config.yaml: {thread_id}: <agent_name>"
     await msg.reply_text(text, message_thread_id=thread_id)
+
+
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать список агентов и команд."""
+    msg = update.message
+    if not msg:
+        return
+    if ALLOWED_USERS and msg.from_user and msg.from_user.id not in ALLOWED_USERS:
+        return
+    thread_id = msg.message_thread_id or 1
+    lines = ["🤖 <b>Агенты InsTracker</b>\n\nПиши в нужный топик:\n"]
+    for topic_id, agent_name in sorted(TOPIC_AGENTS.items()):
+        lines.append(f"• Топик <code>{topic_id}</code> → {agent_name}")
+    lines.append(
+        "\n<b>Команды:</b>\n"
+        "/clear — очистить историю агента в этом топике\n"
+        "/status — проверить подключения\n"
+        "/topic_id — узнать ID текущего топика"
+    )
+    await msg.reply_text("\n".join(lines), message_thread_id=thread_id, parse_mode="HTML")
+
+
+async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Проверить наличие API ключей в env."""
+    msg = update.message
+    if not msg:
+        return
+    if ALLOWED_USERS and msg.from_user and msg.from_user.id not in ALLOWED_USERS:
+        return
+    thread_id = msg.message_thread_id or 1
+    checks = [
+        ("OPENROUTER_API_KEY", "LLM (OpenRouter)"),
+        ("GA4_PROPERTY_ID", "Firebase Analytics (GA4)"),
+        ("GOOGLE_CREDENTIALS_PATH", "Google Service Account"),
+        ("ADAPTY_SECRET_KEY", "Adapty"),
+        ("NOTION_API_KEY", "Notion"),
+    ]
+    status_lines = ["<b>🔌 Статус подключений:</b>"]
+    for env_var, label in checks:
+        value = os.getenv(env_var)
+        icon = "✅" if value and value.strip() else "❌"
+        status_lines.append(f"{icon} {label}")
+    await msg.reply_text("\n".join(status_lines), message_thread_id=thread_id, parse_mode="HTML")
 
 
 async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -255,31 +318,51 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🔹 Генерирую ответ...",
             message_thread_id=thread_id,
         )
+    elif msg.photo:
+        photo = msg.photo[-1]
+        status_msg = await msg.reply_text(
+            "🔹 Анализирую изображение...",
+            message_thread_id=thread_id,
+        )
+        photo_file = await context.bot.get_file(photo.file_id)
+        tmp_path = tempfile.mktemp(suffix=".jpg")
+        await photo_file.download_to_drive(tmp_path)
+        with open(tmp_path, "rb") as f:
+            img_b64 = base64.standard_b64encode(f.read()).decode("ascii")
+        os.unlink(tmp_path)
+        caption = msg.caption or "Проанализируй этот скриншот."
+        user_text = f"[IMAGE_B64:{img_b64}]\n{caption}"
     else:
         return
 
-    await msg.chat.send_action("typing", message_thread_id=thread_id)
+    async def _keep_typing():
+        while not done_event.is_set():
+            await msg.chat.send_action("typing", message_thread_id=thread_id)
+            await asyncio.sleep(4)
 
+    done_event = asyncio.Event()
+    typing_task = asyncio.create_task(_keep_typing())
     try:
-        response = agent.process(user_text)
+        response = await agent.process(user_text)
         # Удаляем статус перед ответом
         if status_msg:
             try:
                 await status_msg.delete()
             except Exception:
                 pass
-        # Telegram лимит 4096 символов
-        if len(response) > 4000:
-            response = response[:3997] + "..."
-        try:
-            await msg.reply_text(
-                response,
-                message_thread_id=thread_id,
-                parse_mode="HTML",
-            )
-        except Exception as parse_err:
-            logger.warning("HTML parse failed, sending as plain text: %s", parse_err)
-            await msg.reply_text(response, message_thread_id=thread_id)
+        parts = split_message(response)
+        for i, part in enumerate(parts):
+            try:
+                if i == 0:
+                    await msg.reply_text(part, message_thread_id=thread_id, parse_mode="HTML")
+                else:
+                    await msg.chat.send_message(part, message_thread_id=thread_id, parse_mode="HTML")
+            except Exception as parse_err:
+                logger.warning("HTML parse failed for part %d, sending as plain text: %s", i + 1, parse_err)
+                if i == 0:
+                    await msg.reply_text(part, message_thread_id=thread_id)
+                else:
+                    await msg.chat.send_message(part, message_thread_id=thread_id)
     except Exception as e:
         logger.exception("Ошибка при обработке запроса: %s", e, exc_info=True)
         if status_msg:
@@ -289,6 +372,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
         user_friendly = _human_error_message(e)
         await msg.reply_text(user_friendly, message_thread_id=thread_id)
+    finally:
+        done_event.set()
+        typing_task.cancel()
 
 
 def main():
@@ -299,10 +385,12 @@ def main():
     app = Application.builder().token(token).build()
 
     app.add_handler(CommandHandler("topic_id", cmd_topic_id))
+    app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("clear", cmd_clear))
     app.add_handler(
         MessageHandler(
-            (filters.TEXT & ~filters.COMMAND) | filters.VOICE,
+            (filters.TEXT & ~filters.COMMAND) | filters.VOICE | filters.PHOTO,
             handle_message,
         )
     )
