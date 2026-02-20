@@ -17,12 +17,19 @@ def _make_client() -> OpenAI:
     return OpenAI()
 
 
+# Модель по умолчанию при использовании OpenRouter
+OPENROUTER_DEFAULT_MODEL = "google/gemini-3-flash-preview"
+
+
 class BaseAgent(ABC):
     """Абстрактный агент с системным промптом и тулами."""
 
     def __init__(self, model: str | None = None):
         self.client = _make_client()
-        self.model = model or os.getenv("LLM_MODEL", "openai/gpt-4o-mini")
+        if os.getenv("OPENROUTER_API_KEY"):
+            self.model = model or os.getenv("LLM_MODEL", OPENROUTER_DEFAULT_MODEL)
+        else:
+            self.model = model or os.getenv("LLM_MODEL", "openai/gpt-4o-mini")
         self.messages: list[dict[str, Any]] = []
 
     @property
@@ -45,6 +52,11 @@ class BaseAgent(ABC):
         """Обработка сообщения пользователя с поддержкой tool calls."""
         self.messages.append({"role": "user", "content": user_message})
 
+        use_openrouter = bool(os.getenv("OPENROUTER_API_KEY"))
+        extra_kwargs: dict[str, Any] = {}
+        if use_openrouter and "gemini" in self.model.lower():
+            extra_kwargs["reasoning"] = {"effort": "high"}
+
         while True:
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -54,6 +66,7 @@ class BaseAgent(ABC):
                 ],
                 tools=self.tools if self.tools else None,
                 tool_choice="auto" if self.tools else None,
+                **extra_kwargs,
             )
 
             choice = response.choices[0]

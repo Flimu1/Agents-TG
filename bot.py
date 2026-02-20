@@ -1,13 +1,18 @@
 """
 Telegram бот: каждый топик в группе = отдельный AI-агент.
 Сообщение в топик обрабатывает соответствующий агент.
+Поддержка голосовых сообщений через OpenRouter (Gemini с аудио).
 """
+import base64
 import logging
 import os
+import tempfile
 from pathlib import Path
+from typing import Optional
 
 import yaml
 from dotenv import load_dotenv
+from openai import OpenAI
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
@@ -35,6 +40,66 @@ ALLOWED_USERS: list[int] = CONFIG.get("telegram", {}).get("allowed_users") or []
 
 # Кэш агентов: (chat_id, thread_id) -> agent instance
 agent_cache: dict[tuple[int, int], object] = {}
+
+
+def _get_openrouter_client() -> Optional[OpenAI]:
+    """OpenRouter-клиент для транскрипции (тот же ключ, что и для агентов)."""
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        return None
+    return OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=api_key,
+    )
+
+
+async def transcribe_voice(bot, voice_file_id: str) -> Optional[str]:
+    """Транскрипция голосового сообщения через OpenRouter (Gemini с аудио)."""
+    client = _get_openrouter_client()
+    if not client:
+        return None
+
+    try:
+        voice_file = await bot.get_file(voice_file_id)
+        tmp_path = tempfile.mktemp(suffix=".ogg")
+        await voice_file.download_to_drive(tmp_path)
+        try:
+            with open(tmp_path, "rb") as f:
+                audio_bytes = f.read()
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+
+        audio_b64 = base64.standard_b64encode(audio_bytes).decode("ascii")
+        model = os.getenv("LLM_MODEL", "google/gemini-3-flash-preview")
+
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Транскрибируй это голосовое сообщение в текст. Верни только текст, без пояснений.",
+                        },
+                        {
+                            "type": "input_audio",
+                            "input_audio": {
+                                "data": audio_b64,
+                                "format": "ogg",
+                            },
+                        },
+                    ],
+                },
+            ],
+            max_tokens=1000,
+        )
+        text = resp.choices[0].message.content
+        return text.strip() if text else None
+    except Exception as e:
+        logger.exception("Voice transcription failed: %s", e)
+        return None
 
 
 def get_agent(agent_name: str, chat_id: int, thread_id: int):
@@ -78,9 +143,9 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка сообщений: роутинг по топику -> агент."""
+    """Обработка сообщений: роутинг по топику -> агент. Поддержка текста и голоса."""
     msg = update.message
-    if not msg or not msg.text:
+    if not msg:
         return
 
     if ALLOWED_USERS and msg.from_user and msg.from_user.id not in ALLOWED_USERS:
@@ -105,10 +170,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(f"Агент '{agent_name}' не найден.", message_thread_id=thread_id)
         return
 
-    # Голосовые — можно расширить: скачать file, speech-to-text
-    user_text = msg.text
+    # Текст или голос -> текст (голос через OpenRouter/Gemini)
     if msg.voice:
-        await msg.reply_text("Голосовые пока не поддерживаются — напиши текстом.", message_thread_id=thread_id)
+        user_text = await transcribe_voice(context.bot, msg.voice.file_id)
+        if not user_text:
+            await msg.reply_text(
+                "Не удалось распознать голос. Проверь OPENROUTER_API_KEY и попробуй ещё раз.",
+                message_thread_id=thread_id,
+            )
+            return
+        logger.info("Voice transcribed: %s...", user_text[:50] if len(user_text) > 50 else user_text)
+    elif msg.text:
+        user_text = msg.text
+    else:
         return
 
     await msg.chat.send_action("typing", message_thread_id=thread_id)
@@ -133,7 +207,12 @@ def main():
 
     app.add_handler(CommandHandler("topic_id", cmd_topic_id))
     app.add_handler(CommandHandler("clear", cmd_clear))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(
+        MessageHandler(
+            (filters.TEXT & ~filters.COMMAND) | filters.VOICE,
+            handle_message,
+        )
+    )
 
     logger.info("Bot started. Topics: %s", TOPIC_AGENTS)
     app.run_polling(allowed_updates=Update.ALL_TYPES)

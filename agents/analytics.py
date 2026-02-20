@@ -2,17 +2,44 @@
 import json
 import os
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import requests
 
 from .base import BaseAgent
 
+
+def _get_credentials_path() -> str | None:
+    """Путь к Firebase credentials (для Firestore и BigQuery)."""
+    cred_path = os.getenv("FIREBASE_CREDENTIALS_PATH")
+    if not cred_path:
+        return None
+    if not os.path.isabs(cred_path):
+        cred_path = str(Path(__file__).parent.parent / cred_path)
+    return cred_path if os.path.exists(cred_path) else None
+
+
+def _get_bigquery_client():
+    """BigQuery-клиент для Firebase Analytics (экспорт в BigQuery)."""
+    cred_path = _get_credentials_path()
+    if not cred_path:
+        return None
+    try:
+        from google.cloud import bigquery
+        from google.oauth2 import service_account
+        cred = service_account.Credentials.from_service_account_file(cred_path)
+        return bigquery.Client(credentials=cred, project=cred.project_id)
+    except ImportError:
+        return None
+    except Exception:
+        return None
+
+
 def _get_firestore():
     """Получить Firestore-клиент (инициализация при первом обращении)."""
-    global _firebase_app
-    cred_path = os.getenv("FIREBASE_CREDENTIALS_PATH")
-    if not cred_path or not os.path.exists(cred_path):
+    cred_path = _get_credentials_path()
+    if not cred_path:
         return None
     try:
         import firebase_admin
@@ -31,7 +58,14 @@ class AnalyticsAgent(BaseAgent):
 
     @property
     def system_prompt(self) -> str:
-        return """Ты — строгий и точный дата-аналитик приложения InsTracker. Твоя задача — анализировать воронки, конверсии и подписки, отвечать только опираясь на свежие данные из базы. Делай выводы кратко и по делу."""
+        return """Ты — строгий и точный дата-аналитик приложения InsTracker. Твоя задача — анализировать воронки, конверсии и подписки, отвечать только опираясь на свежие данные из базы.
+
+Источники данных:
+- get_firebase_analytics — основные метрики Firebase (события, DAU, сессии). Используй первым для аналитики из Firebase.
+- get_adapty_metrics — монетизация (revenue, подписки, триалы).
+- get_firebase_funnel — только если события пишутся в Firestore вручную.
+
+Делай выводы кратко и по делу."""
 
     @property
     def tools(self) -> list[dict]:
@@ -70,8 +104,29 @@ class AnalyticsAgent(BaseAgent):
             {
                 "type": "function",
                 "function": {
+                    "name": "get_firebase_analytics",
+                    "description": "Получить все метрики и события из Firebase Analytics (BigQuery). События, воронка, DAU, конверсии. Основной источник аналитики Firebase.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "days_back": {
+                                "type": "integer",
+                                "description": "За сколько дней брать данные (по умолчанию 30)",
+                            },
+                            "event_names": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Фильтр по именам событий (пусто = все события)",
+                            },
+                        },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
                     "name": "get_firebase_funnel",
-                    "description": "Получить конверсии по шагам онбординга из Firebase (воронка).",
+                    "description": "Получить воронку из Firestore (если события пишутся в коллекцию вручную). Для Firebase Analytics используй get_firebase_analytics.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -101,6 +156,11 @@ class AnalyticsAgent(BaseAgent):
                     date_from=arguments.get("date_from"),
                     date_to=arguments.get("date_to"),
                     period_unit=arguments.get("period_unit", "month"),
+                )
+            if name == "get_firebase_analytics":
+                return self._get_firebase_analytics(
+                    days_back=arguments.get("days_back", 30),
+                    event_names=arguments.get("event_names") or [],
                 )
             if name == "get_firebase_funnel":
                 return self._get_firebase_funnel(
@@ -151,6 +211,81 @@ class AnalyticsAgent(BaseAgent):
                 results.append({"chart_id": chart_id, "data": data})
             except requests.RequestException as e:
                 results.append({"chart_id": chart_id, "error": str(e)})
+
+        return json.dumps(results, ensure_ascii=False, indent=2)
+
+    def _get_firebase_analytics(
+        self,
+        days_back: int = 30,
+        event_names: list[str] | None = None,
+    ) -> str:
+        """Получить метрики и события из Firebase Analytics (BigQuery export)."""
+        client = _get_bigquery_client()
+        if not client:
+            return "BigQuery недоступен. Установи google-cloud-bigquery и задай FIREBASE_CREDENTIALS_PATH."
+
+        dataset_id = os.getenv("FIREBASE_ANALYTICS_DATASET")
+        if not dataset_id:
+            return (
+                "FIREBASE_ANALYTICS_DATASET не задан в .env. "
+                "Укажи dataset из BigQuery (формат: analytics_XXXXX). "
+                "Включи экспорт Firebase Analytics → BigQuery в консоли Firebase."
+            )
+
+        event_filter = ""
+        if event_names:
+            escaped = [f"'{e.replace(chr(39), chr(39)+chr(39))}'" for e in event_names[:20]]
+            event_filter = f" AND event_name IN ({','.join(escaped)})"
+
+        since = (datetime.utcnow() - timedelta(days=days_back)).strftime("%Y%m%d")
+
+        queries = []
+
+        # 1. События и их количество (воронка)
+        q_events = f"""
+        SELECT event_name, COUNT(*) as cnt
+        FROM `{client.project}.{dataset_id}.events_*`
+        WHERE _TABLE_SUFFIX >= '{since}'
+        {event_filter}
+        GROUP BY event_name
+        ORDER BY cnt DESC
+        LIMIT 50
+        """
+        queries.append(("События (воронка)", q_events))
+
+        # 2. DAU / активные пользователи
+        q_dau = f"""
+        SELECT event_date, COUNT(DISTINCT user_pseudo_id) as dau
+        FROM `{client.project}.{dataset_id}.events_*`
+        WHERE _TABLE_SUFFIX >= '{since}'
+        GROUP BY event_date
+        ORDER BY event_date DESC
+        LIMIT 31
+        """
+        queries.append(("DAU по дням", q_dau))
+
+        # 3. Сессии
+        q_sessions = f"""
+        SELECT event_date, COUNT(*) as sessions
+        FROM `{client.project}.{dataset_id}.events_*`
+        WHERE _TABLE_SUFFIX >= '{since}' AND event_name = 'session_start'
+        GROUP BY event_date
+        ORDER BY event_date DESC
+        LIMIT 31
+        """
+        queries.append(("Сессии (session_start)", q_sessions))
+
+        results: list[dict[str, Any]] = []
+        for label, query in queries:
+            try:
+                rows = list(client.query(query).result())
+                if rows:
+                    data = [dict(r) for r in rows]
+                    results.append({"metric": label, "data": data})
+                else:
+                    results.append({"metric": label, "data": [], "note": "Нет данных"})
+            except Exception as e:
+                results.append({"metric": label, "error": str(e)})
 
         return json.dumps(results, ensure_ascii=False, indent=2)
 

@@ -1,7 +1,9 @@
 telegram:
-  group_id: -1003776133551
+  group_id: -1003311864476
   # Только эти user_id могут писать боту (оставь пустым для всех)
   allowed_users: [578076682]
 
 topics:
-  6: notion
+  3: analytics
+  4: product
+  5: notion
