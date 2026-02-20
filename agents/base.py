@@ -66,6 +66,15 @@ def _make_client() -> OpenAI:
 # Модель по умолчанию при использовании OpenRouter
 OPENROUTER_DEFAULT_MODEL = "google/gemini-3-flash-preview"
 
+# Допустимые значения effort для thinking/reasoning (OpenRouter Gemini)
+THINKING_EFFORT_VALUES = ("none", "minimal", "low", "medium", "high", "xhigh")
+
+
+def _get_thinking_effort() -> str | None:
+    """Читает THINKING_EFFORT из env: low, medium, high и др. None = не передавать."""
+    raw = (os.getenv("THINKING_EFFORT") or "").strip().lower()
+    return raw if raw in THINKING_EFFORT_VALUES else None
+
 
 class BaseAgent(ABC):
     """Абстрактный агент с системным промптом и тулами."""
@@ -80,6 +89,7 @@ class BaseAgent(ABC):
         else:
             self.model = model or os.getenv("LLM_MODEL", "openai/gpt-4o-mini")
         self.messages: list[dict[str, Any]] = _load_history(self._agent_key, self._history_limit)
+        self._thinking_effort = _get_thinking_effort()
 
     @property
     @abstractmethod
@@ -117,15 +127,18 @@ class BaseAgent(ABC):
             self.messages.append({"role": "user", "content": user_message})
 
         while True:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
+            kwargs = {
+                "model": self.model,
+                "messages": [
                     {"role": "system", "content": self.system_prompt},
                     *self.messages,
                 ],
-                tools=self.tools if self.tools else None,
-                tool_choice="auto" if self.tools else None,
-            )
+                "tools": self.tools if self.tools else None,
+                "tool_choice": "auto" if self.tools else None,
+            }
+            if self._thinking_effort and os.getenv("OPENROUTER_API_KEY"):
+                kwargs["extra_body"] = {"reasoning": {"effort": self._thinking_effort}}
+            response = self.client.chat.completions.create(**kwargs)
 
             choice = response.choices[0]
             msg = choice.message
