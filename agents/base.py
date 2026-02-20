@@ -39,15 +39,36 @@ def _load_history(agent_key: str, history_limit: int) -> list[dict]:
     return []
 
 
-def _save_history(agent_key: str, messages: list[dict], history_limit: int):
+def _message_to_dict(msg: Any) -> dict:
+    """Приводит сообщение (dict или ChatCompletionMessage) к JSON-сериализуемому dict."""
+    if isinstance(msg, dict):
+        return msg
+    # ChatCompletionMessage из openai
+    role = getattr(msg, "role", "assistant")
+    content = getattr(msg, "content", None) or ""
+    out = {"role": role, "content": content}
+    if getattr(msg, "tool_calls", None):
+        out["tool_calls"] = [
+            {
+                "id": tc.id,
+                "type": "function",
+                "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+            }
+            for tc in msg.tool_calls
+        ]
+    return out
+
+
+def _save_history(agent_key: str, messages: list[Any], history_limit: int):
     if history_limit == 0:
         return
     import time
+    serializable = [_message_to_dict(m) for m in messages[-history_limit:]]
     con = sqlite3.connect(DB_PATH)
     con.execute("""INSERT INTO history(agent_key, messages, updated_at)
         VALUES(?,?,?) ON CONFLICT(agent_key) DO UPDATE SET
         messages=excluded.messages, updated_at=excluded.updated_at""",
-        (agent_key, json.dumps(messages[-history_limit:], ensure_ascii=False), time.time())
+        (agent_key, json.dumps(serializable, ensure_ascii=False), time.time())
     )
     con.commit()
     con.close()
@@ -144,7 +165,7 @@ class BaseAgent(ABC):
             msg = choice.message
 
             if msg.tool_calls:
-                self.messages.append(msg)
+                self.messages.append(_message_to_dict(msg))
                 for tc in msg.tool_calls:
                     name = tc.function.name
                     args = json.loads(tc.function.arguments)
