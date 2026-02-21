@@ -241,11 +241,19 @@ class BaseAgent(ABC):
                 continue
 
             # Финальный текстовый ответ
-            if msg.content:
+            content = (msg.content or "").strip()
+            if content:
                 self.messages.append({"role": "assistant", "content": msg.content})
                 _save_history(self._agent_key, self.messages, self._history_limit)
                 return msg.content
 
+            # Модель не вернула текст (часто после успешных tool calls). Отправляем короткое подтверждение.
+            had_tool_calls = any(m.get("role") == "tool" for m in self.messages)
+            if had_tool_calls:
+                fallback = "✅ Задача выполнена. Проверь результат (например в Notion)."
+                self.messages.append({"role": "assistant", "content": fallback})
+                _save_history(self._agent_key, self.messages, self._history_limit)
+                return fallback
             return "Не удалось сформировать ответ."
 
     async def process(

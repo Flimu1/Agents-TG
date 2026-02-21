@@ -33,6 +33,7 @@ class NotionAgent(BaseAgent):
 Как отвечать:
 - Не пиши длинных текстов. Если тебя просят сохранить гипотезу — просто сохрани ее через инструмент и ответь: "✅ Сохранил на страницу [Название]".
 - Если ищешь информацию — выдавай ее структурированным списком.
+- ОБЯЗАТЕЛЬНО: после любого успешного действия (создание страницы, добавление блоков, сохранение инкремента) всегда пиши пользователю короткое подтверждение в чат. Укажи, что именно сделано и как называется страница или запись. Примеры: «✅ Страница „Призывы к рекламе“ создана. В ней добавлена первая запись с итогами созвона.» или «✅ Сохранил на страницу Unfollowers.» Никогда не заканчивай выполнение без ответа пользователю — без подтверждения он не поймёт, что задача выполнена.
 - Форматирование в Telegram: используй только HTML — <b>жирный</b>, <i>курсив</i>. Никогда не используй звёздочки ** или __ для выделения — в сообщениях они не работают и отображаются как есть.
 - Обязательно добавляй эмодзи для наглядности: 📁 разделы/страницы, 📝 пункты списка, 👤 перед именами людей в инкрементах, 🔍 для поиска. Это делает ответ читаемым и приятным.
 - В ответах пользователю никогда не показывай технические детали: ID страниц, ID блоков (UUID в скобках), названия моделей. Только читаемый текст и названия страниц.
@@ -46,6 +47,15 @@ class NotionAgent(BaseAgent):
 ——— СОХРАНЕНИЕ НОВЫХ ДАННЫХ ———
 Правило про страницу «Unfollowers» действует ИСКЛЮЧИТЕЛЬНО при записи новых данных, сгенерированных агентами (инкременты, гипотезы, выводы, которые пользователь просит сохранить). В этом случае: notion_search('Unfollowers') → получить ID страницы → notion_append_blocks или save_increment_to_notion. Никогда не сохраняй такие инкременты в случайные места.
 Когда пользователь просит только найти или прочитать существующую информацию — это правило НЕ применяется; ищи по ключевым словам по всей базе и читай блоки, как описано в блоке «ПОИСК И ЧТЕНИЕ».
+
+——— КРЕАТИВНОЕ ФОРМАТИРОВАНИЕ И ДАШБОРДЫ ———
+Твоя задача — делать базу визуально идеальной. Используй паттерн 'Дашборд-контейнер':
+Если тебе нужно сгруппировать несколько страниц или создать раздел (например, 'Операционка', 'Тестирование'), действуй строго по этому алгоритму:
+1. Вызови notion_append_blocks с типом callout. Задай ему релевантный emoji (например 👨‍💻, 🧪) и ОБЯЗАТЕЛЬНО задай color: "gray_background".
+2. В ответ инструмент вернет тебе 'ID созданных блоков'. Скопируй ID созданного коллаута.
+3. Теперь, чтобы положить страницы ВНУТРЬ этого коллаута (чтобы они выглядели как вложенные элементы), вызови инструмент notion_create_page и передай скопированный ID коллаута в качестве parent_id.
+Таким образом страницы аккуратно сложатся внутрь серой плашки-контейнера.
+Всегда подбирай иконки (icon) и для самих страниц тоже!
 """
 
     @property
@@ -104,6 +114,7 @@ class NotionAgent(BaseAgent):
                         "properties": {
                             "parent_id": {"type": "string", "description": "ID родительской страницы или базы"},
                             "title": {"type": "string", "description": "Заголовок страницы"},
+                            "icon": {"type": "string", "description": "Один эмодзи-символ для иконки страницы, подходящий по смыслу (например 📞, 💡, 📊)."},
                         },
                         "required": ["parent_id", "title"],
                     },
@@ -123,8 +134,9 @@ class NotionAgent(BaseAgent):
                                 "items": {
                                     "type": "object",
                                     "properties": {
-                                        "type": {"type": "string", "enum": ["paragraph", "heading_2", "heading_3", "bulleted_list_item", "numbered_list_item", "toggle"]},
+                                        "type": {"type": "string", "enum": ["paragraph", "heading_2", "heading_3", "bulleted_list_item", "numbered_list_item", "toggle", "callout"]},
                                         "text": {"type": "string"},
+                                        "color": {"type": "string", "description": "Цвет фона блока. Для красивых дашбордов используй 'gray_background'."},
                                     },
                                     "required": ["type", "text"],
                                 },
@@ -162,7 +174,7 @@ class NotionAgent(BaseAgent):
             if name == "notion_get_blocks":
                 return self._get_blocks(arguments["block_id"], arguments.get("depth", 1))
             if name == "notion_create_page":
-                return self._create_page(arguments["parent_id"], arguments["title"])
+                return self._create_page(arguments["parent_id"], arguments["title"], arguments.get("icon"))
             if name == "notion_append_blocks":
                 return self._append_blocks(arguments["block_id"], arguments["blocks"])
             if name == "save_increment_to_notion":
@@ -241,7 +253,7 @@ class NotionAgent(BaseAgent):
         walk(block_id, depth)
         return "\n".join(lines) if lines else "Блоков нет."
 
-    def _create_page(self, parent_id: str, title: str) -> str:
+    def _create_page(self, parent_id: str, title: str, icon: str | None = None) -> str:
         parent: dict[str, Any]
         try:
             self.notion.databases.retrieve(database_id=parent_id)
@@ -250,7 +262,10 @@ class NotionAgent(BaseAgent):
         except Exception:
             parent = {"page_id": parent_id}
             props = {"title": {"title": [{"text": {"content": title}}]}}
-        page = self.notion.pages.create(parent=parent, properties=props)
+        page_kwargs: dict[str, Any] = {"parent": parent, "properties": props}
+        if icon:
+            page_kwargs["icon"] = {"type": "emoji", "emoji": icon}
+        page = self.notion.pages.create(**page_kwargs)
         return f"Страница создана: {page['id']}"
 
     def _append_blocks(self, block_id: str, blocks: list[dict]) -> str:
@@ -264,7 +279,12 @@ class NotionAgent(BaseAgent):
                 "type": bt,
                 bt: {"rich_text": rich},
             }
-            # Toggle в Notion API — то же rich_text, без children в одном запросе
+            if bt == "callout":
+                payload[bt]["icon"] = {"type": "emoji", "emoji": b.get("emoji", "💡")}
+                payload[bt]["color"] = b.get("color", "default")
+            elif b.get("color"):
+                payload[bt]["color"] = b["color"]
             children.append(payload)
-        self.notion.blocks.children.append(block_id=block_id, children=children)
-        return f"Добавлено блоков: {len(blocks)}"
+        resp = self.notion.blocks.children.append(block_id=block_id, children=children)
+        created_ids = [res.get("id") for res in resp.get("results", [])]
+        return f"Добавлено блоков: {len(blocks)}. ID созданных блоков: {', '.join(map(str, created_ids))}"
