@@ -97,6 +97,10 @@ def split_message(text: str, limit: int = 4000) -> list[str]:
     return parts if parts else [text[:limit]]
 
 
+# Модель для транскрипции голоса (всегда с поддержкой аудио, через OpenRouter)
+VOICE_TRANSCRIPTION_MODEL = "openai/gpt-audio-mini"
+
+
 def _get_openrouter_client() -> Optional[OpenAI]:
     """OpenRouter-клиент для транскрипции (тот же ключ, что и для агентов)."""
     api_key = os.getenv("OPENROUTER_API_KEY")
@@ -114,7 +118,7 @@ async def transcribe_voice(
     *,
     on_status: Optional[Callable[[str], Awaitable[None]]] = None,
 ) -> Optional[str]:
-    """Транскрипция голосового сообщения через OpenRouter (Gemini с аудио)."""
+    """Транскрипция голосового сообщения через OpenRouter (openai/gpt-audio-mini)."""
     client = _get_openrouter_client()
     if not client:
         return None
@@ -137,10 +141,9 @@ async def transcribe_voice(
         if on_status:
             await on_status("Транскрибирую голосовое...")
         audio_b64 = base64.standard_b64encode(audio_bytes).decode("ascii")
-        model = os.getenv("LLM_MODEL", OPENROUTER_DEFAULT_MODEL)
 
         resp = client.chat.completions.create(
-            model=model,
+            model=VOICE_TRANSCRIPTION_MODEL,
             messages=[
                 {
                     "role": "user",
@@ -164,7 +167,15 @@ async def transcribe_voice(
         text = resp.choices[0].message.content
         return text.strip() if text else None
     except Exception as e:
-        logger.exception("Voice transcription failed: %s", e)
+        err_str = str(e).lower()
+        if "input audio" in err_str or "404" in err_str:
+            logger.warning(
+                "Voice transcription: model %s does not support audio. Error: %s",
+                VOICE_TRANSCRIPTION_MODEL,
+                e,
+            )
+        else:
+            logger.exception("Voice transcription failed: %s", e)
         return None
 
 
@@ -361,24 +372,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     async def _animate_loader():
         idx = 0
+        last_text = ""
         while not done_event.is_set():
             frame = frames[idx % len(frames)]
-            if status_msg:
+            new_text = f"<code>{frame} Обработка запроса...</code>"
+            if status_msg and new_text != last_text:
                 try:
-                    await status_msg.edit_text(
-                        f"<code>{frame} Обработка запроса...</code>",
-                        parse_mode="HTML",
-                    )
+                    await status_msg.edit_text(new_text, parse_mode="HTML")
+                    last_text = new_text
                 except BadRequest as e:
                     if "message is not modified" not in str(e).lower():
-                        raise
+                        logger.warning("Spinner edit BadRequest (continuing): %s", e)
+                except Exception as e:
+                    logger.warning("Spinner edit failed (continuing): %s", e)
             if idx % 3 == 0:
                 try:
                     await msg.chat.send_action("typing", message_thread_id=thread_id)
                 except Exception:
                     pass
             idx += 1
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(2.5)
 
     done_event = asyncio.Event()
     loader_task = asyncio.create_task(_animate_loader())

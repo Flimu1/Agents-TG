@@ -50,7 +50,7 @@ cp config.example.yaml config.yaml
 Заполни `.env`:
 - `TELEGRAM_BOT_TOKEN` — от [@BotFather](https://t.me/BotFather)
 - `OPENROUTER_API_KEY` — от [openrouter.ai](https://openrouter.ai) (или `OPENAI_API_KEY` для прямого OpenAI)
-- `LLM_MODEL` — модель (по умолчанию `openai/gpt-4o-mini`), можно `anthropic/claude-3.5-sonnet` и др.
+- `LLM_MODEL` — модель для ответов (по умолчанию `google/gemini-3-flash-preview`), можно `z-ai/glm-5` и др. Голос всегда распознаётся через `openai/gpt-audio-mini` (тот же OpenRouter).
 - `NOTION_API_KEY` — от [notion.so/my-integrations](https://www.notion.so/my-integrations) (для Notion агента)
 
 Заполни `config.yaml`:
