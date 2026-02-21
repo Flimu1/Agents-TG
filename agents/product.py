@@ -8,6 +8,13 @@ from .analytics import AnalyticsAgent, TZ_MINSK
 class ProductAgent(AnalyticsAgent):
     """Агент-продакт-менеджер: анализирует аналитику и предлагает гипотезы для роста конверсии."""
 
+    def __init__(self, **kwargs):
+        # Жестко задаем топовую модель для продуктового агента
+        kwargs["model"] = "google/gemini-3.1-pro-preview"
+        super().__init__(**kwargs)
+        # Включаем глубокое "думание", чтобы гипотезы были максимально проработанными
+        self._thinking_effort = "medium"
+
     @property
     def system_prompt(self) -> str:
         now_minsk = datetime.now(TZ_MINSK)
