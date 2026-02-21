@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sqlite3
 from datetime import datetime
 from abc import ABC, abstractmethod
@@ -167,6 +168,7 @@ class BaseAgent(ABC):
         if not results:
             return "Страница Unfollowers не найдена."
         page_id = results[0]["id"]
+        clean_text = re.sub(r'<[^>]+>', '', text)
         title = f"📌 Инкремент ({datetime.now().strftime('%d.%m.%Y %H:%M')})"
         self.notion.blocks.children.append(
             block_id=page_id,
@@ -180,7 +182,7 @@ class BaseAgent(ABC):
                             {
                                 "object": "block",
                                 "type": "paragraph",
-                                "paragraph": {"rich_text": [{"type": "text", "text": {"content": text}}]}
+                                "paragraph": {"rich_text": [{"type": "text", "text": {"content": clean_text}}]}
                             }
                         ]
                     }
@@ -293,7 +295,8 @@ class BaseAgent(ABC):
                 }
             else:
                 text = b.get("text", "")
-                rich = [{"type": "text", "text": {"content": text}}]
+                clean_text = re.sub(r'<[^>]+>', '', text)
+                rich = [{"type": "text", "text": {"content": clean_text}}]
                 payload = {
                     "object": "block",
                     "type": bt,
