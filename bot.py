@@ -483,16 +483,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await _send_message_with_retry(
                         lambda p=part: msg.chat.send_message(p, message_thread_id=thread_id, parse_mode="HTML")
                     )
-            except Exception as parse_err:
-                logger.warning("HTML parse failed for part %d, sending as plain text: %s", i + 1, parse_err)
-                if i == 0:
-                    await _send_message_with_retry(
-                        lambda p=part: msg.reply_text(p, message_thread_id=thread_id)
-                    )
+            except BadRequest as parse_err:
+                if "parse" in str(parse_err).lower() or "entities" in str(parse_err).lower():
+                    logger.warning("HTML parse failed for part %d, sending as plain text: %s", i + 1, parse_err)
+                    if i == 0:
+                        await _send_message_with_retry(lambda p=part: msg.reply_text(p, message_thread_id=thread_id))
+                    else:
+                        await _send_message_with_retry(lambda p=part: msg.chat.send_message(p, message_thread_id=thread_id))
                 else:
-                    await _send_message_with_retry(
-                        lambda p=part: msg.chat.send_message(p, message_thread_id=thread_id)
-                    )
+                    raise parse_err
     except Exception as e:
         logger.exception("Ошибка при обработке запроса: %s", e, exc_info=True)
         if status_msg:

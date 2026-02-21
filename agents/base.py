@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import sqlite3
+from datetime import datetime
 from abc import ABC, abstractmethod
 from functools import partial
 from pathlib import Path
@@ -166,13 +167,23 @@ class BaseAgent(ABC):
         if not results:
             return "Страница Unfollowers не найдена."
         page_id = results[0]["id"]
+        title = f"📌 Инкремент ({datetime.now().strftime('%d.%m.%Y %H:%M')})"
         self.notion.blocks.children.append(
             block_id=page_id,
             children=[
                 {
                     "object": "block",
-                    "type": "paragraph",
-                    "paragraph": {"rich_text": [{"type": "text", "text": {"content": text}}]},
+                    "type": "toggle",
+                    "toggle": {
+                        "rich_text": [{"type": "text", "text": {"content": title}}],
+                        "children": [
+                            {
+                                "object": "block",
+                                "type": "paragraph",
+                                "paragraph": {"rich_text": [{"type": "text", "text": {"content": text}}]}
+                            }
+                        ]
+                    }
                 }
             ],
         )
