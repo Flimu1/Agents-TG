@@ -18,7 +18,7 @@ import yaml
 from dotenv import load_dotenv
 from openai import OpenAI
 from telegram import Update
-from telegram.error import BadRequest
+from telegram.error import BadRequest, RetryAfter
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
 from agents import AGENTS
@@ -57,6 +57,18 @@ ERROR_MESSAGES = {
     "model": "Модель недоступна. Проверь LLM_MODEL в настройках.",
     "quota": "Исчерпан лимит запросов. Попробуй позже или проверь баланс.",
 }
+
+
+async def _send_message_with_retry(send_coro_factory: Callable[[], Awaitable], max_retries: int = 10):
+    """Отправляет сообщение в Telegram с повторными попытками при лимите (429 RetryAfter)."""
+    for attempt in range(max_retries):
+        try:
+            return await send_coro_factory()
+        except RetryAfter as e:
+            wait = getattr(e, "retry_after", 14) or 14
+            logger.warning("Telegram rate limit (429), waiting %s s before retry (attempt %d/%d)", wait, attempt + 1, max_retries)
+            await asyncio.sleep(wait)
+    raise RuntimeError("Не удалось отправить сообщение после нескольких попыток (лимит Telegram)")
 
 
 def _human_error_message(exc: Exception) -> str:
@@ -460,17 +472,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
         parts = split_message(response)
         for i, part in enumerate(parts):
+            if i > 0:
+                await asyncio.sleep(1.5)
             try:
                 if i == 0:
-                    await msg.reply_text(part, message_thread_id=thread_id, parse_mode="HTML")
+                    await _send_message_with_retry(
+                        lambda p=part: msg.reply_text(p, message_thread_id=thread_id, parse_mode="HTML")
+                    )
                 else:
-                    await msg.chat.send_message(part, message_thread_id=thread_id, parse_mode="HTML")
+                    await _send_message_with_retry(
+                        lambda p=part: msg.chat.send_message(p, message_thread_id=thread_id, parse_mode="HTML")
+                    )
             except Exception as parse_err:
                 logger.warning("HTML parse failed for part %d, sending as plain text: %s", i + 1, parse_err)
                 if i == 0:
-                    await msg.reply_text(part, message_thread_id=thread_id)
+                    await _send_message_with_retry(
+                        lambda p=part: msg.reply_text(p, message_thread_id=thread_id)
+                    )
                 else:
-                    await msg.chat.send_message(part, message_thread_id=thread_id)
+                    await _send_message_with_retry(
+                        lambda p=part: msg.chat.send_message(p, message_thread_id=thread_id)
+                    )
     except Exception as e:
         logger.exception("Ошибка при обработке запроса: %s", e, exc_info=True)
         if status_msg:
@@ -479,7 +501,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
         user_friendly = _human_error_message(e)
-        await msg.reply_text(user_friendly, message_thread_id=thread_id)
+        await _send_message_with_retry(
+            lambda: msg.reply_text(user_friendly, message_thread_id=thread_id)
+        )
     finally:
         done_event.set()
         loader_task.cancel()
