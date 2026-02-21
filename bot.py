@@ -126,8 +126,8 @@ def split_message(text: str, limit: int = 4000) -> list[str]:
     return parts if parts else [text[:limit]]
 
 
-# Модель для транскрипции голоса (всегда с поддержкой аудио, через OpenRouter)
-VOICE_TRANSCRIPTION_MODEL = "openai/gpt-audio-mini"
+# Модель для транскрипции голоса (с поддержкой аудио, через OpenRouter)
+VOICE_TRANSCRIPTION_MODEL = "mistralai/voxtral-small-24b-2507"
 
 
 def _get_openrouter_client() -> Optional[OpenAI]:
@@ -147,7 +147,7 @@ async def transcribe_voice(
     *,
     on_status: Optional[Callable[[str], Awaitable[None]]] = None,
 ) -> Optional[str]:
-    """Транскрипция голосового сообщения через OpenRouter (openai/gpt-audio-mini)."""
+    """Транскрипция голосового сообщения через OpenRouter."""
     client = _get_openrouter_client()
     if not client:
         return None
@@ -161,7 +161,7 @@ async def transcribe_voice(
         tmp_file.close()
         try:
             await voice_file.download_to_drive(tmp_path)
-            # openai/gpt-audio-mini принимает только wav и mp3; Telegram присылает ogg → конвертируем в mp3
+            # Модели для аудио обычно принимают wav и mp3; Telegram присылает ogg → конвертируем в mp3
             audio = AudioSegment.from_file(tmp_path, format="ogg")
             mp3_path = tmp_path + ".mp3"
             try:
@@ -181,6 +181,7 @@ async def transcribe_voice(
 
         resp = client.chat.completions.create(
             model=VOICE_TRANSCRIPTION_MODEL,
+            temperature=0.0,
             messages=[
                 {
                     "role": "user",
