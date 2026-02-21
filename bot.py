@@ -80,6 +80,14 @@ def _human_error_message(exc: Exception) -> str:
     return "Произошла ошибка при обработке запроса. Попробуй ещё раз или напиши разработчику."
 
 
+def _sanitize_response_for_user(text: str) -> str:
+    """Убирает технические детали из ответа агента: ID страниц/блоков Notion (UUID в скобках)."""
+    import re
+    # UUID в скобках, например (2d01199f-0c24-80e5-9c8b-c62640bf79a0)
+    text = re.sub(r"\s*\([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\)\s*", " ", text)
+    return re.sub(r" +", " ", text).strip()
+
+
 def split_message(text: str, limit: int = 4000) -> list[str]:
     """Разбить текст на части по абзацам, не превышая limit символов."""
     if len(text) <= limit:
@@ -413,16 +421,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         start_time = time.time()
         response = await agent.process(user_text, status_callback=sync_status_callback)
-        end_time = time.time()
-        duration = end_time - start_time
+        duration = time.time() - start_time
         if duration >= 60:
-            minutes = int(duration // 60)
-            seconds = int(duration % 60)
-            time_formatted = f"{minutes}m {seconds}s"
+            time_str = f"{int(duration // 60)}m {int(duration % 60)}s"
         else:
-            time_formatted = f"{int(duration)}s"
-        model_name = agent.model
-        header = f"<code>{model_name} | {time_formatted}</code>\n\n"
+            time_str = f"{int(duration)}s"
+        response = _sanitize_response_for_user(response)
+        # Строка «модель · время» без тега <code>, чтобы отображалась как обычный текст
+        safe_model = (agent.model or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        header = f"{safe_model} · {time_str}\n\n"
         response = header + response
         # Удаляем статус перед ответом
         if status_msg:
