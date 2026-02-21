@@ -1,9 +1,11 @@
 """Notion AI Agent — работа с Notion: страницы, базы, блоки."""
 import os
+from datetime import datetime
 from typing import Any
 
-from notion_client import APIResponseError, Client
+from notion_client import APIResponseError
 
+from .analytics import TZ_MINSK
 from .base import BaseAgent
 
 
@@ -12,24 +14,28 @@ class NotionAgent(BaseAgent):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        token = os.getenv("NOTION_API_KEY")
-        self.notion = Client(auth=token) if token else None
 
     @property
     def system_prompt(self) -> str:
-        return """Ты — системный архитектор и хранитель знаний команды приложения InsTracker. Твоя задача — поддерживать порядок в базе Notion, сохранять туда важные отчеты, идеи от продакта и результаты созвонов команды.
+        now_minsk = datetime.now(TZ_MINSK)
+        date_minsk = now_minsk.strftime("%Y-%m-%d")
+        return f"""Часовой пояс: Минск (UTC+3). Текущая дата: {date_minsk}.
+
+Ты — системный архитектор и хранитель знаний команды приложения InsTracker. Твоя задача — поддерживать порядок в базе Notion, сохранять туда важные отчеты, идеи от продакта и результаты созвонов команды.
 
 Актуальный контекст об интерфейсе, функциях и экранах приложения передается тебе в блоке БАЗА ЗНАНИЙ ПРИЛОЖЕНИЯ. Обязательно учитывай эту информацию при формировании гипотез, поиске страниц или анализе метрик.
 
 Твои инструменты (Notion API):
 - notion_search: всегда используй первым, чтобы найти нужную базу или страницу, если у тебя нет ее точного ID.
-- notion_get_page / notion_get_blocks: прочитать контент. У notion_get_blocks задай depth=3 (или 4), чтобы увидеть все уровни: годы → даты → тогглы с именами; id блока в скобках — это block_id для добавления в него нового тоггла.
+- notion_get_page / notion_get_blocks: прочитать контент. По умолчанию notion_get_blocks возвращает только верхний уровень (depth=1). Используй depth>1 только для конкретного небольшого блока, когда нужно заглянуть внутрь; id блока в скобках — это block_id для добавления в него нового тоггла.
 - notion_create_page / notion_append_blocks: чтобы аккуратно записать новые данные. Помни, что ID в Notion выглядят как длинные строки с дефисами (UUID).
 
 Как отвечать:
 - Не пиши длинных текстов. Если тебя просят сохранить гипотезу — просто сохрани ее через инструмент и ответь: "✅ Сохранил на страницу [Название]".
 - Если ищешь информацию — выдавай ее структурированным списком.
 - Используй Telegram HTML: <b>жирный шрифт</b> для названий страниц, эмодзи (📁, 📝, 🔍) для визуального порядка.
+
+ВАЖНОЕ ПРАВИЛО ЕДИНОЙ БАЗЫ: Любые инкременты, которые пользователь просит сохранить, ты ОБЯЗАН складывать СТРОГО на страницу «Unfollowers» (внутри Happy AI Team). Для этого сначала используй `notion_search` (запрос 'Unfollowers'), чтобы получить ID страницы, а затем `notion_append_blocks`, чтобы добавить текст. Никогда не сохраняй инкременты в случайные места рабочего пространства.
 """
 
     @property
@@ -67,12 +73,12 @@ class NotionAgent(BaseAgent):
                 "type": "function",
                 "function": {
                     "name": "notion_get_blocks",
-                    "description": "Получить блоки страницы или блока. С depth>1 — рекурсивно все вложенные уровни (год→даты→тогглы с именами). У каждого блока в скобках указан id — его можно передать в notion_append_blocks как block_id, чтобы добавить туда дочерние блоки.",
+                    "description": "Получить блоки страницы или блока. С depth>1 — рекурсивно все вложенные уровни (год→даты→тогглы с именами). У каждого блока в скобках указан id — его можно передать в notion_append_blocks как block_id, чтобы добавить туда дочерние блоки. ВНИМАНИЕ: По умолчанию depth=1 (только верхний уровень). Используй depth>1 ТОЛЬКО если тебе нужно заглянуть внутрь конкретного небольшого блока. Никогда не вызывай depth=3 или 4 для целых страниц, это приведет к зависанию!",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "block_id": {"type": "string", "description": "ID страницы или блока"},
-                            "depth": {"type": "integer", "description": "Глубина обхода: 1 — только прямой уровень, 2–4 — с вложенными блоками (даты, тогглы). По умолчанию 3.", "default": 3},
+                            "depth": {"type": "integer", "description": "Глубина обхода: 1 — только прямой уровень, 2–4 — с вложенными блоками (даты, тогглы). По умолчанию 1.", "default": 1},
                         },
                         "required": ["block_id"],
                     },
@@ -118,6 +124,20 @@ class NotionAgent(BaseAgent):
                     },
                 },
             },
+            {
+                "type": "function",
+                "function": {
+                    "name": "save_increment_to_notion",
+                    "description": "Сохранить важный вывод, метрику, гипотезу или инкремент в единую базу знаний Notion на страницу Unfollowers.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "text": {"type": "string", "description": "Текст инкремента для сохранения"},
+                        },
+                        "required": ["text"],
+                    },
+                },
+            },
         ]
 
     def _call_tool(self, name: str, arguments: dict) -> str:
@@ -130,11 +150,13 @@ class NotionAgent(BaseAgent):
             if name == "notion_get_page":
                 return self._get_page(arguments["page_id"])
             if name == "notion_get_blocks":
-                return self._get_blocks(arguments["block_id"], arguments.get("depth", 3))
+                return self._get_blocks(arguments["block_id"], arguments.get("depth", 1))
             if name == "notion_create_page":
                 return self._create_page(arguments["parent_id"], arguments["title"])
             if name == "notion_append_blocks":
                 return self._append_blocks(arguments["block_id"], arguments["blocks"])
+            if name == "save_increment_to_notion":
+                return self._save_increment_to_notion(arguments.get("text", ""))
         except APIResponseError as e:
             return f"Notion API ошибка: {e.body}"
         except Exception as e:
@@ -190,7 +212,7 @@ class NotionAgent(BaseAgent):
             return content["rich_text"][0].get("plain_text", "")
         return ""
 
-    def _get_blocks(self, block_id: str, depth: int = 3) -> str:
+    def _get_blocks(self, block_id: str, depth: int = 1) -> str:
         lines: list[str] = []
 
         def walk(bid: str, level: int) -> None:

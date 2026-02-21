@@ -10,6 +10,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from notion_client import Client
 from openai import OpenAI
 
 DB_PATH = Path(__file__).parent.parent / "agent_history.db"
@@ -113,6 +114,7 @@ TOOL_STATUS_MESSAGES: dict[str, str] = {
     "notion_get_blocks": "📑 Читаю блоки страницы в Notion...",
     "notion_create_page": "✨ Создаю страницу в Notion...",
     "notion_append_blocks": "📝 Добавляю блоки в Notion...",
+    "save_increment_to_notion": "📌 Сохраняю инкремент в Notion...",
 }
 
 
@@ -131,6 +133,7 @@ class BaseAgent(ABC):
         self._app_knowledge = _load_app_knowledge()
         _init_db()
         self.client = _make_client()
+        self.notion = Client(auth=os.getenv("NOTION_API_KEY")) if os.getenv("NOTION_API_KEY") else None
         if os.getenv("OPENROUTER_API_KEY"):
             self.model = model or os.getenv("LLM_MODEL", OPENROUTER_DEFAULT_MODEL)
         else:
@@ -153,6 +156,27 @@ class BaseAgent(ABC):
     def _call_tool(self, name: str, arguments: dict) -> str:
         """Вызов тула по имени. Переопределяется в наследниках."""
         raise NotImplementedError(f"Tool {name} not implemented")
+
+    def _save_increment_to_notion(self, text: str) -> str:
+        """Сохранить инкремент (текст) на страницу Unfollowers в Notion."""
+        if self.notion is None:
+            return "NOTION_API_KEY не задан."
+        resp = self.notion.search(query="Unfollowers", page_size=1)
+        results = resp.get("results", [])
+        if not results:
+            return "Страница Unfollowers не найдена."
+        page_id = results[0]["id"]
+        self.notion.blocks.children.append(
+            block_id=page_id,
+            children=[
+                {
+                    "object": "block",
+                    "type": "paragraph",
+                    "paragraph": {"rich_text": [{"type": "text", "text": {"content": text}}]},
+                }
+            ],
+        )
+        return "✅ Инкремент успешно сохранен в Notion (страница Unfollowers)"
 
     def _process_sync(
         self,

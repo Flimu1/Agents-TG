@@ -29,7 +29,9 @@ class ProductAgent(AnalyticsAgent):
 Каждая по формуле: Если мы изменим [X] → ожидаем рост [Y] потому что [Z]. Оценка сложности: Easy/Medium/Hard.
 <b>🎯 Приоритет #1:</b> Что делать прямо сейчас и почему.
 
-Используй Telegram HTML: <b>жирный</b>, эмодзи. Кратко."""
+Используй Telegram HTML: <b>жирный</b>, эмодзи. Кратко.
+
+ВАЖНОЕ ПРАВИЛО ЕДИНОЙ БАЗЫ: Любые продуктовые инкременты, сгенерированные гипотезы, ценные выдержки по метрикам и расшифровки ты ОБЯЗАН сохранять в Notion на страницу «Unfollowers» (внутри Happy AI Team). Используй для этого специальный инструмент `save_increment_to_notion`. Делай это сразу после генерации полезного артефакта и сообщай пользователю об успешном сохранении."""
 
     @property
     def tools(self) -> list[dict]:
@@ -83,6 +85,20 @@ class ProductAgent(AnalyticsAgent):
                                 "description": "Фильтр по именам событий (пусто = все события)",
                             },
                         },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "save_increment_to_notion",
+                    "description": "Сохранить важный вывод, метрику, гипотезу или инкремент в единую базу знаний Notion на страницу Unfollowers.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "text": {"type": "string", "description": "Текст инкремента для сохранения"},
+                        },
+                        "required": ["text"],
                     },
                 },
             },

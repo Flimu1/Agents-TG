@@ -81,7 +81,9 @@ class AnalyticsAgent(BaseAgent):
 Как отвечать:
 - Кратко, только на основе цифр из инструментов.
 - Telegram HTML: <b>жирный</b> для метрик и заголовков, эмодзи (💰 MRR/выручка, 📥 инсталлы, 📉 сгорание, 📈 рост).
-- В конце — один емкий вывод: главная проблема или успех."""
+- В конце — один емкий вывод: главная проблема или успех.
+
+ВАЖНОЕ ПРАВИЛО ЕДИНОЙ БАЗЫ: Любые продуктовые инкременты, сгенерированные гипотезы, ценные выдержки по метрикам и расшифровки ты ОБЯЗАН сохранять в Notion на страницу «Unfollowers» (внутри Happy AI Team). Используй для этого специальный инструмент `save_increment_to_notion`. Делай это сразу после генерации полезного артефакта и сообщай пользователю об успешном сохранении."""
 
     @property
     def tools(self) -> list[dict]:
@@ -160,6 +162,20 @@ class AnalyticsAgent(BaseAgent):
                     },
                 },
             },
+            {
+                "type": "function",
+                "function": {
+                    "name": "save_increment_to_notion",
+                    "description": "Сохранить важный вывод, метрику, гипотезу или инкремент в единую базу знаний Notion на страницу Unfollowers.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "text": {"type": "string", "description": "Текст инкремента для сохранения"},
+                        },
+                        "required": ["text"],
+                    },
+                },
+            },
         ]
 
     def _call_tool(self, name: str, arguments: dict) -> str:
@@ -181,6 +197,8 @@ class AnalyticsAgent(BaseAgent):
                     event_names=arguments.get("event_names") or [],
                     days_back=arguments.get("days_back", 30),
                 )
+            if name == "save_increment_to_notion":
+                return self._save_increment_to_notion(arguments.get("text", ""))
         except Exception as e:
             return f"Ошибка: {e}"
         return f"Unknown tool: {name}"
