@@ -285,18 +285,27 @@ class BaseAgent(ABC):
         children = []
         for b in blocks:
             bt = b.get("type", "paragraph")
-            text = b.get("text", "")
-            rich = [{"type": "text", "text": {"content": text}}]
-            payload: dict[str, Any] = {
-                "object": "block",
-                "type": bt,
-                bt: {"rich_text": rich},
-            }
-            if bt == "callout":
-                payload[bt]["icon"] = {"type": "emoji", "emoji": b.get("emoji", "💡")}
-                payload[bt]["color"] = b.get("color", "default")
-            elif b.get("color"):
-                payload[bt]["color"] = b["color"]
+            if bt == "link_to_page":
+                payload: dict[str, Any] = {
+                    "object": "block",
+                    "type": "link_to_page",
+                    "link_to_page": {"type": "page_id", "page_id": b.get("page_id", "")}
+                }
+            else:
+                text = b.get("text", "")
+                rich = [{"type": "text", "text": {"content": text}}]
+                payload = {
+                    "object": "block",
+                    "type": bt,
+                    bt: {"rich_text": rich},
+                }
+                if bt == "callout":
+                    payload[bt]["icon"] = {"type": "emoji", "emoji": b.get("emoji", "💡")}
+                    payload[bt]["color"] = b.get("color", "default")
+                elif bt == "to_do":
+                    payload[bt]["checked"] = bool(b.get("checked", False))
+                elif b.get("color"):
+                    payload[bt]["color"] = b["color"]
             children.append(payload)
         resp = self.notion.blocks.children.append(block_id=block_id, children=children)
         created_ids = [res.get("id") for res in resp.get("results", [])]

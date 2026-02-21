@@ -51,6 +51,7 @@ class ProductAgent(AnalyticsAgent):
 3. Теперь, чтобы положить страницы ВНУТРЬ этого коллаута (чтобы они выглядели как вложенные элементы), вызови инструмент notion_create_page и передай скопированный ID коллаута в качестве parent_id.
 Таким образом страницы аккуратно сложатся внутрь серой плашки-контейнера.
 Всегда подбирай иконки (icon) и для самих страниц тоже!
+Задачи и action items оформляй чекбоксами (notion_append_blocks с типом to_do; для выполненных — checked: true).
 6. Компактность (Toggle-листы): Если контента много (подробные итоги созвона, длинный список задач, метрики), ОБЯЗАТЕЛЬНО упаковывай его в спойлеры (тип блока `toggle`), чтобы страница не превращалась в бесконечную простыню.
 Алгоритм:
 - Вызови `notion_append_blocks`, создав блок типа `toggle` с названием события (например, '📞 Созвон 19 февраля').
@@ -64,6 +65,7 @@ class ProductAgent(AnalyticsAgent):
 
     @property
     def tools(self) -> list[dict]:
+        # Продуктовые метрики + полный набор Notion (в т.ч. notion_append_blocks с to_do для чекбоксов)
         return [
             {
                 "type": "function",
@@ -114,6 +116,92 @@ class ProductAgent(AnalyticsAgent):
                                 "description": "Фильтр по именам событий (пусто = все события)",
                             },
                         },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "notion_search",
+                    "description": "Поиск страниц и баз в Notion по запросу",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "Поисковый запрос"},
+                        },
+                        "required": ["query"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "notion_get_page",
+                    "description": "Получить страницу по ID",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "page_id": {"type": "string", "description": "UUID страницы"},
+                        },
+                        "required": ["page_id"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "notion_get_blocks",
+                    "description": "Получить блоки страницы или блока. С depth>1 — вложенные уровни. У каждого блока в скобках указан id — его можно передать в notion_append_blocks как block_id. По умолчанию depth=1.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "block_id": {"type": "string", "description": "ID страницы или блока"},
+                            "depth": {"type": "integer", "description": "Глубина обхода (по умолчанию 1)", "default": 1},
+                        },
+                        "required": ["block_id"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "notion_create_page",
+                    "description": "Создать новую страницу в Notion",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "parent_id": {"type": "string", "description": "ID родительской страницы или базы"},
+                            "title": {"type": "string", "description": "Заголовок страницы"},
+                            "icon": {"type": "string", "description": "Эмодзи для иконки страницы (например 📞, 💡)."},
+                        },
+                        "required": ["parent_id", "title"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "notion_append_blocks",
+                    "description": "Добавить блоки к странице в Notion. Поддерживает чекбоксы (to_do): type=to_do, text=текст, checked=true/false.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "block_id": {"type": "string", "description": "ID страницы или блока"},
+                            "blocks": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "type": {"type": "string", "enum": ["paragraph", "heading_2", "heading_3", "bulleted_list_item", "numbered_list_item", "toggle", "callout", "to_do"]},
+                                        "text": {"type": "string"},
+                                        "color": {"type": "string", "description": "Цвет фона (например gray_background)."},
+                                        "checked": {"type": "boolean", "description": "Для to_do: true — отмечено, false — не отмечено."},
+                                    },
+                                    "required": ["type", "text"],
+                                },
+                            },
+                        },
+                        "required": ["block_id", "blocks"],
                     },
                 },
             },

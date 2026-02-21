@@ -104,6 +104,7 @@ class AnalyticsAgent(BaseAgent):
 3. Теперь, чтобы положить страницы ВНУТРЬ этого коллаута (чтобы они выглядели как вложенные элементы), вызови инструмент notion_create_page и передай скопированный ID коллаута в качестве parent_id.
 Таким образом страницы аккуратно сложатся внутрь серой плашки-контейнера.
 Всегда подбирай иконки (icon) и для самих страниц тоже!
+Задачи и action items оформляй чекбоксами (тип to_do в notion_append_blocks); для выполненных пунктов указывай checked: true.
 6. Компактность (Toggle-листы): Если контента много (подробные итоги созвона, длинный список задач, метрики), ОБЯЗАТЕЛЬНО упаковывай его в спойлеры (тип блока `toggle`), чтобы страница не превращалась в бесконечную простыню.
 Алгоритм:
 - Вызови `notion_append_blocks`, создав блок типа `toggle` с названием события (например, '📞 Созвон 19 февраля').
@@ -265,9 +266,10 @@ class AnalyticsAgent(BaseAgent):
                                 "items": {
                                     "type": "object",
                                     "properties": {
-                                        "type": {"type": "string", "enum": ["paragraph", "heading_2", "heading_3", "bulleted_list_item", "numbered_list_item", "toggle", "callout"]},
+                                        "type": {"type": "string", "enum": ["paragraph", "heading_2", "heading_3", "bulleted_list_item", "numbered_list_item", "toggle", "callout", "to_do"]},
                                         "text": {"type": "string"},
                                         "color": {"type": "string", "description": "Цвет фона блока. Для красивых дашбордов используй 'gray_background'."},
+                                        "checked": {"type": "boolean", "description": "Для to_do: true — отмечено выполненным, false или не указывать — не отмечено."},
                                     },
                                     "required": ["type", "text"],
                                 },
