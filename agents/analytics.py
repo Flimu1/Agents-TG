@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import requests
+from notion_client import APIResponseError
 
 from .base import BaseAgent
 
@@ -83,7 +84,31 @@ class AnalyticsAgent(BaseAgent):
 - Telegram HTML: <b>жирный</b> для метрик и заголовков, эмодзи (💰 MRR/выручка, 📥 инсталлы, 📉 сгорание, 📈 рост).
 - В конце — один емкий вывод: главная проблема или успех.
 
-ВАЖНОЕ ПРАВИЛО ЕДИНОЙ БАЗЫ: Любые продуктовые инкременты, сгенерированные гипотезы, ценные выдержки по метрикам и расшифровки ты ОБЯЗАН сохранять в Notion на страницу «Unfollowers» (внутри Happy AI Team). Используй для этого специальный инструмент `save_increment_to_notion`. Делай это сразу после генерации полезного артефакта и сообщай пользователю об успешном сохранении."""
+В ответах пользователю никогда не показывай технические детали: ID страниц, ID блоков (UUID в скобках). После создания или изменения страниц пиши короткое подтверждение.
+
+——— ПОИСК И ЧТЕНИЕ ———
+Если пользователь просит найти или прочитать информацию (например: «кто написал инкременты за вчера», «покажи инкременты за понедельник»):
+1. Используй notion_search по ключевым словам из запроса (например «Инкременты», «Unfollowers» или тему отчета). Ищи нужную страницу по всей базе, не ограничивайся одной страницей.
+2. СЕКРЕТ ПОИСКА ПО ДАТАМ: notion_get_blocks возвращает только текст блоков, без системных метаданных о дате. Чтобы найти «вчерашний инкремент» или запись по конкретной дате — ищи внутри блоков текст с этой датой или названием дня недели (понедельник, вторник, 2025-02-20 и т.д.). Не пытайся опираться на даты из API.
+3. Если нашел нужный тоггл или блок с датой — проваливайся в него: вызови notion_get_blocks с его block_id (и при необходимости depth>1), чтобы прочитать содержимое.
+
+——— СОХРАНЕНИЕ НОВЫХ ДАННЫХ ———
+Правило про страницу «Unfollowers» действует ИСКЛЮЧИТЕЛЬНО при записи новых данных, сгенерированных агентами (инкременты, метрики, гипотезы, выводы, которые пользователь просит сохранить). В этом случае: notion_search('Unfollowers') → получить ID страницы → notion_append_blocks или save_increment_to_notion. Никогда не сохраняй такие инкременты в случайные места.
+Когда пользователь просит только найти или прочитать существующую информацию — это правило НЕ применяется; ищи по ключевым словам по всей базе и читай блоки, как описано в блоке «ПОИСК И ЧТЕНИЕ».
+
+——— КРЕАТИВНОЕ ФОРМАТИРОВАНИЕ И ДАШБОРДЫ ———
+Твоя задача — делать базу визуально идеальной. Используй паттерн 'Дашборд-контейнер':
+Если тебе нужно сгруппировать несколько страниц или создать раздел (например, 'Операционка', 'Тестирование'), действуй строго по этому алгоритму:
+1. Вызови notion_append_blocks с типом callout. Задай ему релевантный emoji (например 👨‍💻, 🧪) и ОБЯЗАТЕЛЬНО задай color: "gray_background".
+2. В ответ инструмент вернет тебе 'ID созданных блоков'. Скопируй ID созданного коллаута.
+3. Теперь, чтобы положить страницы ВНУТРЬ этого коллаута (чтобы они выглядели как вложенные элементы), вызови инструмент notion_create_page и передай скопированный ID коллаута в качестве parent_id.
+Таким образом страницы аккуратно сложатся внутрь серой плашки-контейнера.
+Всегда подбирай иконки (icon) и для самих страниц тоже!
+
+——— ОЧИСТКА ГОЛОСОВОГО ВВОДА И МУСОРА ———
+Пользователь часто диктует запросы голосом на ходу. В тексте могут быть слова-паразиты, запинки, размышления вслух и прямые команды (например, 'ну короче запиши это как', 'типа', 'давай добавим гипотезу что').
+Твоя задача — действовать как умный ассистент: понимать СМЫСЛ и вычленять суть, отбрасывая всю шелуху.
+Особенно это важно при использовании инструмента `save_increment_to_notion`: передавай в него только чистый, профессионально сформулированный текст инкремента, вывода или гипотезы, полностью очищенный от разговорного стиля и команд пользователя."""
 
     @property
     def tools(self) -> list[dict]:
@@ -165,6 +190,91 @@ class AnalyticsAgent(BaseAgent):
             {
                 "type": "function",
                 "function": {
+                    "name": "notion_search",
+                    "description": "Поиск страниц и баз в Notion по запросу",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "Поисковый запрос"},
+                        },
+                        "required": ["query"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "notion_get_page",
+                    "description": "Получить страницу по ID",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "page_id": {"type": "string", "description": "UUID страницы"},
+                        },
+                        "required": ["page_id"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "notion_get_blocks",
+                    "description": "Получить блоки страницы или блока. С depth>1 — рекурсивно все вложенные уровни (год→даты→тогглы с именами). У каждого блока в скобках указан id — его можно передать в notion_append_blocks как block_id, чтобы добавить туда дочерние блоки. ВНИМАНИЕ: По умолчанию depth=1 (только верхний уровень). Используй depth>1 ТОЛЬКО если тебе нужно заглянуть внутрь конкретного небольшого блока. Никогда не вызывай depth=3 или 4 для целых страниц, это приведет к зависанию!",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "block_id": {"type": "string", "description": "ID страницы или блока"},
+                            "depth": {"type": "integer", "description": "Глубина обхода: 1 — только прямой уровень, 2–4 — с вложенными блоками (даты, тогглы). По умолчанию 1.", "default": 1},
+                        },
+                        "required": ["block_id"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "notion_create_page",
+                    "description": "Создать новую страницу",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "parent_id": {"type": "string", "description": "ID родительской страницы или базы"},
+                            "title": {"type": "string", "description": "Заголовок страницы"},
+                            "icon": {"type": "string", "description": "Один эмодзи-символ для иконки страницы, подходящий по смыслу (например 📞, 💡, 📊)."},
+                        },
+                        "required": ["parent_id", "title"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "notion_append_blocks",
+                    "description": "Добавить блоки к странице",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "block_id": {"type": "string", "description": "ID страницы или блока"},
+                            "blocks": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "type": {"type": "string", "enum": ["paragraph", "heading_2", "heading_3", "bulleted_list_item", "numbered_list_item", "toggle", "callout"]},
+                                        "text": {"type": "string"},
+                                        "color": {"type": "string", "description": "Цвет фона блока. Для красивых дашбордов используй 'gray_background'."},
+                                    },
+                                    "required": ["type", "text"],
+                                },
+                            },
+                        },
+                        "required": ["block_id", "blocks"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
                     "name": "save_increment_to_notion",
                     "description": "Сохранить важный вывод, метрику, гипотезу или инкремент в единую базу знаний Notion на страницу Unfollowers.",
                     "parameters": {
@@ -197,8 +307,20 @@ class AnalyticsAgent(BaseAgent):
                     event_names=arguments.get("event_names") or [],
                     days_back=arguments.get("days_back", 30),
                 )
+            if name == "notion_search":
+                return self._search(arguments["query"])
+            if name == "notion_get_page":
+                return self._get_page(arguments["page_id"])
+            if name == "notion_get_blocks":
+                return self._get_blocks(arguments["block_id"], arguments.get("depth", 1))
+            if name == "notion_create_page":
+                return self._create_page(arguments["parent_id"], arguments["title"], arguments.get("icon"))
+            if name == "notion_append_blocks":
+                return self._append_blocks(arguments["block_id"], arguments["blocks"])
             if name == "save_increment_to_notion":
                 return self._save_increment_to_notion(arguments.get("text", ""))
+        except APIResponseError as e:
+            return f"Notion API ошибка: {e.body}"
         except Exception as e:
             return f"Ошибка: {e}"
         return f"Unknown tool: {name}"

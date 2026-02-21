@@ -10,7 +10,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from notion_client import Client
+from notion_client import APIResponseError, Client
 from openai import OpenAI
 
 DB_PATH = Path(__file__).parent.parent / "agent_history.db"
@@ -177,6 +177,119 @@ class BaseAgent(ABC):
             ],
         )
         return "✅ Инкремент успешно сохранен в Notion (страница Unfollowers)"
+
+    def _search(self, query: str) -> str:
+        if self.notion is None:
+            return "NOTION_API_KEY не задан."
+        resp = self.notion.search(query=query, page_size=10)
+        items = []
+        for r in resp.get("results", []):
+            obj = r.get("object", "")
+            props = r.get("properties", {})
+            title = "?"
+            for key in ("title", "Name"):
+                if key in props and isinstance(props[key].get("title"), list):
+                    arr = props[key]["title"]
+                    if arr:
+                        title = arr[0].get("plain_text", "?")
+                        break
+            items.append(f"- {obj} {r['id']}: {title}")
+        return "\n".join(items) if items else "Ничего не найдено."
+
+    def _get_page(self, page_id: str) -> str:
+        if self.notion is None:
+            return "NOTION_API_KEY не задан."
+        page = self.notion.pages.retrieve(page_id=page_id)
+        props = page.get("properties", {})
+        title = props.get("title", props.get("Name", {}))
+        if isinstance(title.get("title"), list) and title["title"]:
+            title = title["title"][0].get("plain_text", "")
+        return f"Страница: {title}\nID: {page_id}"
+
+    def _blocks_children_all(self, block_id: str) -> list[dict]:
+        """Все дочерние блоки с учётом пагинации."""
+        if self.notion is None:
+            return []
+        out: list[dict] = []
+        cursor: str | None = None
+        while True:
+            kwargs: dict[str, Any] = {"block_id": block_id, "page_size": 100}
+            if cursor:
+                kwargs["start_cursor"] = cursor
+            resp = self.notion.blocks.children.list(**kwargs)
+            out.extend(resp.get("results", []))
+            if not resp.get("has_more"):
+                break
+            cursor = resp.get("next_cursor")
+            if not cursor:
+                break
+        return out
+
+    def _block_text(self, b: dict) -> str:
+        t = b.get("type", "")
+        content = b.get(t, {})
+        if "rich_text" in content and content["rich_text"]:
+            return content["rich_text"][0].get("plain_text", "")
+        return ""
+
+    def _get_blocks(self, block_id: str, depth: int = 1) -> str:
+        lines: list[str] = []
+
+        def walk(bid: str, level: int) -> None:
+            if level <= 0:
+                return
+            children = self._blocks_children_all(bid)
+            indent = "  " * (depth - level)
+            for b in children:
+                t = b.get("type", "")
+                text = self._block_text(b)
+                bid_child = b.get("id", "")
+                lines.append(f"{indent}[{t}] {text} (id: {bid_child})")
+                if level > 1:
+                    walk(bid_child, level - 1)
+
+        walk(block_id, depth)
+        return "\n".join(lines) if lines else "Блоков нет."
+
+    def _create_page(self, parent_id: str, title: str, icon: str | None = None) -> str:
+        if self.notion is None:
+            return "NOTION_API_KEY не задан."
+        parent: dict[str, Any]
+        try:
+            self.notion.databases.retrieve(database_id=parent_id)
+            parent = {"database_id": parent_id}
+            props = {"Name": {"title": [{"text": {"content": title}}]}}
+        except Exception:
+            parent = {"page_id": parent_id}
+            props = {"title": {"title": [{"text": {"content": title}}]}}
+        page_kwargs: dict[str, Any] = {"parent": parent, "properties": props}
+        if icon:
+            page_kwargs["icon"] = {"type": "emoji", "emoji": icon}
+        page = self.notion.pages.create(**page_kwargs)
+        return f"Страница создана: {page['id']}"
+
+    def _append_blocks(self, block_id: str, blocks: list[dict]) -> str:
+        if self.notion is None:
+            return "NOTION_API_KEY не задан."
+        children = []
+        for b in blocks:
+            bt = b.get("type", "paragraph")
+            text = b.get("text", "")
+            rich = [{"type": "text", "text": {"content": text}}]
+            payload: dict[str, Any] = {
+                "object": "block",
+                "type": bt,
+                bt: {"rich_text": rich},
+            }
+            if bt == "callout":
+                payload[bt]["icon"] = {"type": "emoji", "emoji": b.get("emoji", "💡")}
+                payload[bt]["color"] = b.get("color", "default")
+            elif b.get("color"):
+                payload[bt]["color"] = b["color"]
+            children.append(payload)
+        resp = self.notion.blocks.children.append(block_id=block_id, children=children)
+        created_ids = [res.get("id") for res in resp.get("results", [])]
+        return f"Добавлено блоков: {len(blocks)}. ID созданных блоков: {', '.join(map(str, created_ids))}"
 
     def _process_sync(
         self,
