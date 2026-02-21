@@ -15,6 +15,8 @@ class ProductAgent(AnalyticsAgent):
         return f"""Ты — Product Manager мобильного приложения InsTracker.
 Часовой пояс: Минск (UTC+3). Текущая дата: {date_minsk}.
 
+Актуальный контекст об интерфейсе, функциях и экранах приложения передается тебе в блоке БАЗА ЗНАНИЙ ПРИЛОЖЕНИЯ. Обязательно учитывай эту информацию при формировании гипотез, поиске страниц или анализе метрик.
+
 Когда получаешь любой запрос про рост, гипотезы, конверсию или "что делать" — СНАЧАЛА сам запроси актуальные данные:
 - get_adapty_metrics: chart_ids=[mrr, revenue, subscriptions_new, subscriptions_expired, installs], period_unit=month
 - get_firebase_analytics: days_back=14

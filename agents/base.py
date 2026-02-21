@@ -6,16 +6,29 @@ import json
 import os
 import sqlite3
 from abc import ABC, abstractmethod
+from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Optional
 
 from openai import OpenAI
 
 DB_PATH = Path(__file__).parent.parent / "agent_history.db"
+APP_KNOWLEDGE_PATH = Path(__file__).resolve().parent.parent / "docs" / "app_knowledge.md"
+
+
+def _load_app_knowledge() -> str:
+    """Читает docs/app_knowledge.md. При отсутствии файла или ошибке возвращает пустую строку."""
+    try:
+        if APP_KNOWLEDGE_PATH.is_file():
+            return APP_KNOWLEDGE_PATH.read_text(encoding="utf-8")
+    except (OSError, IOError):
+        pass
+    return ""
 
 
 def _init_db():
-    con = sqlite3.connect(DB_PATH)
+    con = sqlite3.connect(DB_PATH, timeout=10.0)
+    con.execute("PRAGMA journal_mode=WAL;")
     con.execute("""CREATE TABLE IF NOT EXISTS history (
         agent_key TEXT PRIMARY KEY,
         messages TEXT NOT NULL,
@@ -28,7 +41,7 @@ def _init_db():
 def _load_history(agent_key: str, history_limit: int) -> list[dict]:
     if history_limit == 0:
         return []
-    con = sqlite3.connect(DB_PATH)
+    con = sqlite3.connect(DB_PATH, timeout=10.0)
     row = con.execute(
         "SELECT messages FROM history WHERE agent_key=?", (agent_key,)
     ).fetchone()
@@ -64,7 +77,7 @@ def _save_history(agent_key: str, messages: list[Any], history_limit: int):
         return
     import time
     serializable = [_message_to_dict(m) for m in messages[-history_limit:]]
-    con = sqlite3.connect(DB_PATH)
+    con = sqlite3.connect(DB_PATH, timeout=10.0)
     con.execute("""INSERT INTO history(agent_key, messages, updated_at)
         VALUES(?,?,?) ON CONFLICT(agent_key) DO UPDATE SET
         messages=excluded.messages, updated_at=excluded.updated_at""",
@@ -90,6 +103,18 @@ OPENROUTER_DEFAULT_MODEL = "google/gemini-3-flash-preview"
 # Допустимые значения effort для thinking/reasoning (OpenRouter Gemini)
 THINKING_EFFORT_VALUES = ("none", "minimal", "low", "medium", "high", "xhigh")
 
+# Сообщения статуса при вызове инструментов (для отображения в Telegram)
+TOOL_STATUS_MESSAGES: dict[str, str] = {
+    "get_adapty_metrics": "📊 Запрашиваю данные из Adapty...",
+    "get_firebase_analytics": "📈 Запрашиваю аналитику GA4...",
+    "get_firebase_funnel": "🔄 Строю воронку в GA4...",
+    "notion_search": "🔍 Ищу в базе Notion...",
+    "notion_get_page": "📄 Открываю страницу в Notion...",
+    "notion_get_blocks": "📑 Читаю блоки страницы в Notion...",
+    "notion_create_page": "✨ Создаю страницу в Notion...",
+    "notion_append_blocks": "📝 Добавляю блоки в Notion...",
+}
+
 
 def _get_thinking_effort() -> str | None:
     """Читает THINKING_EFFORT из env: low, medium, high и др. None = не передавать."""
@@ -103,6 +128,7 @@ class BaseAgent(ABC):
     def __init__(self, model: str | None = None, agent_name: str = "", thread_id: int = 0, history_limit: int = 6):
         self._agent_key = f"{agent_name}:{thread_id}"
         self._history_limit = history_limit
+        self._app_knowledge = _load_app_knowledge()
         _init_db()
         self.client = _make_client()
         if os.getenv("OPENROUTER_API_KEY"):
@@ -128,7 +154,11 @@ class BaseAgent(ABC):
         """Вызов тула по имени. Переопределяется в наследниках."""
         raise NotImplementedError(f"Tool {name} not implemented")
 
-    def _process_sync(self, user_message: str) -> str:
+    def _process_sync(
+        self,
+        user_message: str,
+        status_callback: Optional[Callable[[str], None]] = None,
+    ) -> str:
         """Обработка сообщения пользователя с поддержкой tool calls (синхронная)."""
         if user_message.startswith("[IMAGE_B64:"):
             prefix = "[IMAGE_B64:"
@@ -147,11 +177,15 @@ class BaseAgent(ABC):
         else:
             self.messages.append({"role": "user", "content": user_message})
 
+        system_content = self.system_prompt
+        if self._app_knowledge:
+            system_content += "\n\n--- БАЗА ЗНАНИЙ ПРИЛОЖЕНИЯ ---\n\n" + self._app_knowledge
+
         while True:
             kwargs = {
                 "model": self.model,
                 "messages": [
-                    {"role": "system", "content": self.system_prompt},
+                    {"role": "system", "content": system_content},
                     *self.messages,
                 ],
                 "tools": self.tools if self.tools else None,
@@ -169,6 +203,11 @@ class BaseAgent(ABC):
                 for tc in msg.tool_calls:
                     name = tc.function.name
                     args = json.loads(tc.function.arguments)
+                    if status_callback:
+                        status_text = TOOL_STATUS_MESSAGES.get(
+                            name, f"⚙️ Вызываю {name}..."
+                        )
+                        status_callback(status_text)
                     result = self._call_tool(name, args)
                     self.messages.append({
                         "role": "tool",
@@ -185,10 +224,16 @@ class BaseAgent(ABC):
 
             return "Не удалось сформировать ответ."
 
-    async def process(self, user_message: str) -> str:
+    async def process(
+        self,
+        user_message: str,
+        status_callback: Optional[Callable[[str], None]] = None,
+    ) -> str:
         """Асинхронная обёртка над _process_sync — не блокирует event loop."""
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, self._process_sync, user_message)
+        return await loop.run_in_executor(
+            None, partial(self._process_sync, user_message, status_callback)
+        )
 
     def clear_history(self):
         """Очистить историю диалога."""

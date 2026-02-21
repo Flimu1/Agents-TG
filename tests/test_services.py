@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Проверка доступа ко всем сервисам: Firebase, Adapty, Notion, OpenRouter.
-Запуск: python test_services.py
+Запуск: python tests/test_services.py
 """
 import os
 import sys
@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Добавляем корень проекта в path
-PROJECT_ROOT = Path(__file__).parent
+PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from agents.analytics import _get_credentials_path, _get_ga4_client

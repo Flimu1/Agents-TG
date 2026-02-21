@@ -8,6 +8,7 @@ import base64
 import logging
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
@@ -15,6 +16,7 @@ import yaml
 from dotenv import load_dotenv
 from openai import OpenAI
 from telegram import Update
+from telegram.error import BadRequest
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
 from agents import AGENTS
@@ -121,9 +123,11 @@ async def transcribe_voice(
         if on_status:
             await on_status("Скачиваю голосовое...")
         voice_file = await bot.get_file(voice_file_id)
-        tmp_path = tempfile.mktemp(suffix=".ogg")
-        await voice_file.download_to_drive(tmp_path)
+        tmp_file = tempfile.NamedTemporaryFile(suffix=".ogg", delete=False)
+        tmp_path = tmp_file.name
+        tmp_file.close()
         try:
+            await voice_file.download_to_drive(tmp_path)
             with open(tmp_path, "rb") as f:
                 audio_bytes = f.read()
         finally:
@@ -326,25 +330,72 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             message_thread_id=thread_id,
         )
         photo_file = await context.bot.get_file(photo.file_id)
-        tmp_path = tempfile.mktemp(suffix=".jpg")
-        await photo_file.download_to_drive(tmp_path)
-        with open(tmp_path, "rb") as f:
-            img_b64 = base64.standard_b64encode(f.read()).decode("ascii")
-        os.unlink(tmp_path)
+        tmp_file = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+        tmp_path = tmp_file.name
+        tmp_file.close()
+        try:
+            await photo_file.download_to_drive(tmp_path)
+            with open(tmp_path, "rb") as f:
+                img_b64 = base64.standard_b64encode(f.read()).decode("ascii")
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
         caption = msg.caption or "Проанализируй этот скриншот."
         user_text = f"[IMAGE_B64:{img_b64}]\n{caption}"
     else:
         return
 
-    async def _keep_typing():
+    async def update_status(text: str) -> None:
+        if status_msg:
+            try:
+                await status_msg.edit_text(f"🔹 {text}")
+            except Exception:
+                pass
+
+    loop = asyncio.get_running_loop()
+
+    def sync_status_callback(text: str) -> None:
+        asyncio.run_coroutine_threadsafe(update_status(text), loop)
+
+    frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
+    async def _animate_loader():
+        idx = 0
         while not done_event.is_set():
-            await msg.chat.send_action("typing", message_thread_id=thread_id)
-            await asyncio.sleep(4)
+            frame = frames[idx % len(frames)]
+            if status_msg:
+                try:
+                    await status_msg.edit_text(
+                        f"<code>{frame} Обработка запроса...</code>",
+                        parse_mode="HTML",
+                    )
+                except BadRequest as e:
+                    if "message is not modified" not in str(e).lower():
+                        raise
+            if idx % 3 == 0:
+                try:
+                    await msg.chat.send_action("typing", message_thread_id=thread_id)
+                except Exception:
+                    pass
+            idx += 1
+            await asyncio.sleep(1.5)
 
     done_event = asyncio.Event()
-    typing_task = asyncio.create_task(_keep_typing())
+    loader_task = asyncio.create_task(_animate_loader())
     try:
-        response = await agent.process(user_text)
+        start_time = time.time()
+        response = await agent.process(user_text, status_callback=sync_status_callback)
+        end_time = time.time()
+        duration = end_time - start_time
+        if duration >= 60:
+            minutes = int(duration // 60)
+            seconds = int(duration % 60)
+            time_formatted = f"{minutes}m {seconds}s"
+        else:
+            time_formatted = f"{int(duration)}s"
+        model_name = agent.model
+        header = f"<code>{model_name} | {time_formatted}</code>\n\n"
+        response = header + response
         # Удаляем статус перед ответом
         if status_msg:
             try:
@@ -375,7 +426,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(user_friendly, message_thread_id=thread_id)
     finally:
         done_event.set()
-        typing_task.cancel()
+        loader_task.cancel()
 
 
 def main():

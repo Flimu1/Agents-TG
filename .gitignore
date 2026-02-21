@@ -4,3 +4,5 @@ __pycache__/
 *.pyc
 firebase-key.json
 agent_history.db
+agent_history.db-shm
+agent_history.db-wal

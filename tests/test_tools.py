@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Тесты инструментов агентов: вызов _call_tool и проверка корректности ответов.
-Запуск: python test_tools.py
+Запуск: python tests/test_tools.py
 """
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-PROJECT_ROOT = Path(__file__).parent
+PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 
