@@ -80,6 +80,25 @@ def _human_error_message(exc: Exception) -> str:
     return "Произошла ошибка при обработке запроса. Попробуй ещё раз или напиши разработчику."
 
 
+def _escape_html(s: str) -> str:
+    """Экранирует символы для Telegram HTML."""
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _markdown_to_telegram_html(text: str) -> str:
+    """Конвертирует Markdown (**жирный**, *курсив*) в Telegram HTML (<b>, <i>)."""
+    import re
+    # **текст** → <b>текст</b> (сначала жирный, чтобы не спутать с курсивом)
+    text = re.sub(r"\*\*(.+?)\*\*", lambda m: "<b>" + _escape_html(m.group(1)) + "</b>", text)
+    # __текст__ → <b>текст</b>
+    text = re.sub(r"__(.+?)__", lambda m: "<b>" + _escape_html(m.group(1)) + "</b>", text)
+    # *один символ* (не двойная звёздочка) → <i>текст</i>
+    text = re.sub(r"\*([^*]+?)\*", lambda m: "<i>" + _escape_html(m.group(1)) + "</i>", text)
+    # _текст_ → <i>текст</i>
+    text = re.sub(r"_([^_]+?)_", lambda m: "<i>" + _escape_html(m.group(1)) + "</i>", text)
+    return text
+
+
 def _sanitize_response_for_user(text: str) -> str:
     """Убирает технические детали из ответа агента: ID страниц/блоков Notion (UUID в скобках)."""
     import re
@@ -427,6 +446,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             time_str = f"{int(duration)}s"
         response = _sanitize_response_for_user(response)
+        response = _markdown_to_telegram_html(response)
         # Строка «модель · время» без тега <code>, чтобы отображалась как обычный текст
         safe_model = (agent.model or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         header = f"{safe_model} · {time_str}\n\n"
