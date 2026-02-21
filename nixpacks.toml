@@ -1,0 +1,3 @@
+# Голосовые: pydub конвертирует ogg → mp3; для этого нужен ffmpeg в образе
+[phases.setup]
+nixPkgs = ["...", "ffmpeg"]

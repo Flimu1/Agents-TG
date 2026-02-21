@@ -98,6 +98,7 @@ python bot.py
    - опционально: `ADAPTY_SECRET_KEY`, `FIREBASE_CREDENTIALS_PATH`
 3. Railway подхватит `Procfile` и запустит `worker: python bot.py`
 4. `config.yaml` уже в репо — group_id и topics настроены
+5. Для голосовых сообщений в образ добавляется ffmpeg через `nixpacks.toml` (конвертация ogg → mp3 для API).
 
 ## Добавление новых агентов
 

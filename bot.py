@@ -12,6 +12,8 @@ import time
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
+from pydub import AudioSegment
+
 import yaml
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -132,8 +134,16 @@ async def transcribe_voice(
         tmp_file.close()
         try:
             await voice_file.download_to_drive(tmp_path)
-            with open(tmp_path, "rb") as f:
-                audio_bytes = f.read()
+            # openai/gpt-audio-mini принимает только wav и mp3; Telegram присылает ogg → конвертируем в mp3
+            audio = AudioSegment.from_file(tmp_path, format="ogg")
+            mp3_path = tmp_path + ".mp3"
+            try:
+                audio.export(mp3_path, format="mp3")
+                with open(mp3_path, "rb") as f:
+                    audio_bytes = f.read()
+            finally:
+                if os.path.exists(mp3_path):
+                    os.unlink(mp3_path)
         finally:
             if os.path.exists(tmp_path):
                 os.unlink(tmp_path)
@@ -156,7 +166,7 @@ async def transcribe_voice(
                             "type": "input_audio",
                             "input_audio": {
                                 "data": audio_b64,
-                                "format": "ogg",
+                                "format": "mp3",
                             },
                         },
                     ],
@@ -172,6 +182,11 @@ async def transcribe_voice(
             logger.warning(
                 "Voice transcription: model %s does not support audio. Error: %s",
                 VOICE_TRANSCRIPTION_MODEL,
+                e,
+            )
+        elif "ffmpeg" in err_str or "could not find" in err_str or "pydub" in err_str:
+            logger.warning(
+                "Voice transcription: конвертация ogg→mp3 не удалась (нужен ffmpeg). %s",
                 e,
             )
         else:
