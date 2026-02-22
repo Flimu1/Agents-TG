@@ -28,23 +28,43 @@ def _get_credentials_path() -> str | None:
     return cred_path if os.path.exists(cred_path) else None
 
 
+def _get_credentials_info() -> dict | None:
+    """
+    Credentials из переменной окружения с полным JSON (для деплоя, например Railway).
+    Переменная: GOOGLE_APPLICATION_CREDENTIALS_JSON — содержимое firebase-key.json как строка.
+    """
+    raw = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+    if not raw or not raw.strip():
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+
+
 def _get_ga4_client():
     """GA4 Data API клиент (lazy, при первом обращении)."""
     global _ga4_client
     if _ga4_client is not None:
         return _ga4_client
-    cred_path = _get_credentials_path()
-    if not cred_path:
-        return None
     try:
         from google.analytics.data_v1beta import BetaAnalyticsDataClient
+        from google.oauth2 import service_account
 
-        _ga4_client = BetaAnalyticsDataClient.from_service_account_file(cred_path)
-        return _ga4_client
+        info = _get_credentials_info()
+        if info:
+            cred = service_account.Credentials.from_service_account_info(info)
+            _ga4_client = BetaAnalyticsDataClient(credentials=cred)
+            return _ga4_client
+        cred_path = _get_credentials_path()
+        if cred_path:
+            _ga4_client = BetaAnalyticsDataClient.from_service_account_file(cred_path)
+            return _ga4_client
     except ImportError:
-        return None
+        pass
     except Exception:
-        return None
+        pass
+    return None
 
 
 class AnalyticsAgent(BaseAgent):
@@ -416,7 +436,8 @@ class AnalyticsAgent(BaseAgent):
         client = _get_ga4_client()
         if not client:
             return (
-                "GA4 недоступен. Задай GOOGLE_CREDENTIALS_PATH (путь к service account JSON) в .env."
+                "GA4 недоступен. Задай GOOGLE_APPLICATION_CREDENTIALS_JSON (полный JSON ключа) "
+                "или GOOGLE_CREDENTIALS_PATH (путь к файлу) в .env."
             )
 
         property_id = os.getenv("GA4_PROPERTY_ID")
@@ -527,7 +548,8 @@ class AnalyticsAgent(BaseAgent):
         client = _get_ga4_client()
         if not client:
             return (
-                "GA4 недоступен. Задай GOOGLE_CREDENTIALS_PATH (путь к service account JSON) в .env."
+                "GA4 недоступен. Задай GOOGLE_APPLICATION_CREDENTIALS_JSON (полный JSON ключа) "
+                "или GOOGLE_CREDENTIALS_PATH (путь к файлу) в .env."
             )
 
         property_id = os.getenv("GA4_PROPERTY_ID")

@@ -286,17 +286,26 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if ALLOWED_USERS and msg.from_user and msg.from_user.id not in ALLOWED_USERS:
         return
     thread_id = msg.message_thread_id or 1
+    def _has_google_creds():
+        return (
+            (os.getenv("GOOGLE_CREDENTIALS_PATH") or "").strip()
+            or (os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON") or "").strip()
+        )
+
     checks = [
         ("OPENROUTER_API_KEY", "LLM (OpenRouter)"),
         ("GA4_PROPERTY_ID", "Firebase Analytics (GA4)"),
-        ("GOOGLE_CREDENTIALS_PATH", "Google Service Account"),
+        (None, "Google Service Account"),  # особый случай — две переменные
         ("ADAPTY_SECRET_KEY", "Adapty"),
         ("NOTION_API_KEY", "Notion"),
     ]
     status_lines = ["<b>🔌 Статус подключений:</b>"]
     for env_var, label in checks:
-        value = os.getenv(env_var)
-        icon = "✅" if value and value.strip() else "❌"
+        if env_var is None:
+            value = _has_google_creds()
+        else:
+            value = os.getenv(env_var)
+        icon = "✅" if value and (value if isinstance(value, str) else "").strip() else "❌"
         status_lines.append(f"{icon} {label}")
     await msg.reply_text("\n".join(status_lines), message_thread_id=thread_id, parse_mode="HTML")
 

@@ -5,6 +5,7 @@
 
 Используй имя dataset (например analytics_123456789) для FIREBASE_ANALYTICS_DATASET в .env
 """
+import json
 import os
 import sys
 from pathlib import Path
@@ -15,6 +16,22 @@ load_dotenv()
 
 
 def _get_client():
+    try:
+        from google.cloud import bigquery
+        from google.oauth2 import service_account
+    except ImportError:
+        return None
+
+    # Сначала проверяем переменную с полным JSON (удобно для Railway и др.)
+    raw = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+    if raw and raw.strip():
+        try:
+            info = json.loads(raw)
+            cred = service_account.Credentials.from_service_account_info(info)
+            return bigquery.Client(credentials=cred, project=cred.project_id)
+        except Exception:
+            pass
+
     cred_path = os.getenv("FIREBASE_CREDENTIALS_PATH")
     if not cred_path:
         return None
@@ -23,8 +40,6 @@ def _get_client():
     if not os.path.exists(cred_path):
         return None
     try:
-        from google.cloud import bigquery
-        from google.oauth2 import service_account
         cred = service_account.Credentials.from_service_account_file(cred_path)
         return bigquery.Client(credentials=cred, project=cred.project_id)
     except Exception:
